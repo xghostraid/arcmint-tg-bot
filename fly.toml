@@ -1,0 +1,29 @@
+# Fly.io — 24/7 bot (survives Mac sleep / lid closed)
+# After: fly auth login && fly launch --copy-config --yes
+# Or: fly deploy
+
+app = "arctrade-bot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  DATA_DIR = "/data"
+
+[processes]
+  app = "npx tsx src/index.ts"
+
+[[mounts]]
+  source = "arctrade_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[restart]
+  policy = "always"
+  retries = 50
