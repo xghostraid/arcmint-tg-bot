@@ -31,7 +31,12 @@ async function bot(): Promise<ReturnType<typeof createBot>> {
 
 export default async function handler(req: Req, res: Res): Promise<void> {
   if (req.method === 'GET' || req.method === 'HEAD') {
-    res.status(200).json({ ok: true, service: 'arctrade-bot' });
+    const h = await ensureArcHealth();
+    res.status(200).json({
+      ok: true,
+      service: 'arctrade-bot',
+      arc: { live: h.live, chainId: h.chainId, block: h.blockNumber, rpc: h.rpcHost, error: h.error },
+    });
     return;
   }
   if (req.method !== 'POST') {
