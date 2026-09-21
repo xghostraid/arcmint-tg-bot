@@ -599,6 +599,11 @@ export type ReferralStats = {
 };
 
 /** Remember a token the user bought / was seen holding (RPC fallback for positions). */
+function isPlaceholderSymbol(symbol: string): boolean {
+  const s = (symbol || '').trim().toUpperCase();
+  return !s || s === 'TOKEN' || s === '???' || s === 'UNKNOWN';
+}
+
 export function rememberToken(
   tgId: number,
   address: string,
@@ -607,11 +612,24 @@ export function rememberToken(
 ): void {
   const addr = address.toLowerCase();
   const now = Math.floor(Date.now() / 1000);
+  const safe = isPlaceholderSymbol(symbol) ? '' : symbol.slice(0, 32);
+  if (!safe) {
+    db.prepare(`INSERT OR IGNORE INTO user_tokens (tg_id, token_address) VALUES (?, ?)`).run(
+      tgId,
+      addr,
+    );
+    return;
+  }
   db.prepare(
     `INSERT INTO known_tokens (address, symbol, decimals, first_seen)
      VALUES (?, ?, ?, ?)
-     ON CONFLICT(address) DO UPDATE SET symbol = excluded.symbol, decimals = excluded.decimals`,
-  ).run(addr, symbol.slice(0, 32), decimals, now);
+     ON CONFLICT(address) DO UPDATE SET
+       symbol = CASE
+         WHEN known_tokens.symbol IN ('TOKEN', '???', '') THEN excluded.symbol
+         ELSE excluded.symbol
+       END,
+       decimals = excluded.decimals`,
+  ).run(addr, safe, decimals, now);
   db.prepare(
     `INSERT OR IGNORE INTO user_tokens (tg_id, token_address) VALUES (?, ?)`,
   ).run(tgId, addr);

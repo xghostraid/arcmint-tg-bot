@@ -2,6 +2,7 @@ import { Bot, InputFile, type Context, session, type SessionFlavor } from 'gramm
 import { formatUnits, isAddress, getAddress, type Hex } from 'viem';
 import { env } from '../config/env.js';
 import { addressUrl } from '../chain/client.js';
+import { formatArcStatus, getArcHealth, isArcLive } from '../chain/health.js';
 import {
   addWallet,
   ensureUser,
@@ -162,7 +163,8 @@ async function homeText(tgId: number): Promise<string> {
   const lang = userLang(tgId);
   const w = getActiveWallet(tgId);
   if (!w) {
-    return t(lang, 'home_no_wallet');
+    const down = getArcHealth().live ? '' : `\n\n${t(lang, 'chain_offline')}`;
+    return `${t(lang, 'home_no_wallet')}${down}`;
   }
 
   // Never hang home > 4s even if Arc RPC is dead
@@ -182,16 +184,31 @@ async function homeText(tgId: number): Promise<string> {
     cashStr = '—';
   }
 
+  const health = getArcHealth();
+  const rpcLine = health.live
+    ? `_Arc Mainnet \`${env.chainId}\` · live_`
+    : t(lang, 'chain_offline');
+
   return [
     `*ArcTradeBot*  ·  Arc`,
     ``,
     `\`${w.address}\``,
     ``,
     `${t(lang, 'home_usdc')}  \`${cashStr}\``,
+    rpcLine,
     `_Open Positions for token marks_`,
     ``,
     t(lang, 'home_paste'),
   ].join('\n');
+}
+
+async function requireArcLive(ctx: BotContext): Promise<boolean> {
+  if (isArcLive()) return true;
+  await ctx.reply(t(langOf(ctx), 'chain_offline'), {
+    parse_mode: 'Markdown',
+    reply_markup: mainMenu(hasAnyWallet(ctx.from!.id), langOf(ctx)),
+  });
+  return false;
 }
 
 function hasAnyWallet(tgId: number): boolean {
@@ -306,6 +323,13 @@ export function createBot(token: string): Bot<BotContext> {
 
   bot.command('home', async (ctx) => {
     await sendHome(ctx);
+  });
+
+  bot.command('status', async (ctx) => {
+    await ctx.reply(formatArcStatus({ admin: env.isAdmin(ctx.from?.id) }), {
+      parse_mode: 'Markdown',
+      reply_markup: mainMenu(hasAnyWallet(ctx.from!.id), langOf(ctx)),
+    });
   });
 
   bot.command('help', async (ctx) => {
@@ -1083,6 +1107,7 @@ function referralInviteLink(tgId: number): string {
 }
 
 async function showPositions(ctx: BotContext, edit = false): Promise<void> {
+  if (!(await requireArcLive(ctx))) return;
   const id = ctx.from!.id;
   const w = getActiveWallet(id);
   if (!w) {
@@ -1351,6 +1376,7 @@ async function showReferralHowItWorks(ctx: BotContext): Promise<void> {
 }
 
 async function showBridge(ctx: BotContext, edit = false): Promise<void> {
+  if (!(await requireArcLive(ctx))) return;
   const id = ctx.from!.id;
   const w = getActiveWallet(id);
   if (!w) {
@@ -1584,6 +1610,7 @@ async function runBridgeClaim(
 }
 
 async function showSellPicker(ctx: BotContext, edit = false): Promise<void> {
+  if (!(await requireArcLive(ctx))) return;
   const id = ctx.from!.id;
   const w = getActiveWallet(id);
   if (!w) {
@@ -2054,6 +2081,7 @@ async function executeSell(
 }
 
 async function openBuy(ctx: BotContext, token: `0x${string}`): Promise<void> {
+  if (!(await requireArcLive(ctx))) return;
   const id = ctx.from!.id;
   const w = getActiveWallet(id);
   if (!w) {

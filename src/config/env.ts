@@ -65,19 +65,21 @@ export const env = {
    * Arc Mainnet RPC. Defaults to Alchemy public docs-demo (works with Origin header).
    * Fallbacks: Blockscout eth-rpc + thirdweb.
    */
-  rpcUrl: () =>
-    opt('ARC_RPC_URL', 'https://arc-mainnet.g.alchemy.com/v2/docs-demo'),
+  rpcUrl: () => opt('ARC_RPC_URL', 'https://rpc.mainnet.arc.io'),
   rpcFallbacks: () =>
     opt(
       'ARC_RPC_FALLBACKS',
-      'https://arc-mainnet.cloud.blockscout.com/api/eth-rpc,https://5042.rpc.thirdweb.com',
+      'https://rpc.blockdaemon.mainnet.arc.io,https://rpc.drpc.mainnet.arc.io,https://rpc.quicknode.mainnet.arc.io,https://rpc.arc-scan.org',
     )
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
-  explorer: () => opt('ARC_EXPLORER', 'https://arc-scan.org'),
+  explorer: () => opt('ARC_EXPLORER', 'https://explorer.arc.io'),
 
   usdc: () => addr('USDC_ADDRESS', '0x3600000000000000000000000000000000000000'),
+  /** ArcMint Fair Mode factory (mainnet v7). Used to resolve live token names. */
+  launchFactory: () =>
+    addr('LAUNCH_FACTORY', '0x0F5d0D0271068568134Fa2ca834756f34C485901'),
   swapRouter: () =>
     addr('SWAP_ROUTER', '0x53bf6b0684ec7ef91e1387da3d1a1769bc5a6f77'),
   quoter: () => addr('QUOTER', '0x7dfd4f31be6814d2906bde155c3e1b146eac1468'),

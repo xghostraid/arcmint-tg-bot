@@ -2,8 +2,8 @@
  * Always-on ArcTrade bot — explicit getUpdates loop (more reliable than bot.start alone).
  */
 import { env } from './config/env.js';
-import { publicClient, arcMainnet } from './chain/client.js';
 import { createBot } from './bot/handlers.js';
+import { probeArcHealth, startArcHealthLoop } from './chain/health.js';
 import type { Update } from 'grammy/types';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -40,17 +40,8 @@ function installProcessGuards(): void {
 }
 
 async function probeArcRpcQuick(): Promise<void> {
-  try {
-    const client = publicClient();
-    const chainId = await withTimeout(client.getChainId(), 8_000, 'getChainId');
-    const block = await withTimeout(client.getBlockNumber(), 8_000, 'getBlockNumber');
-    console.log(`[arc] ok chainId=${chainId} block=${block} name=${arcMainnet.name}`);
-  } catch (e) {
-    console.warn(
-      '[arc] RPC probe failed (bot still starts):',
-      e instanceof Error ? e.message : e,
-    );
-  }
+  startArcHealthLoop();
+  await probeArcHealth();
 }
 
 /**

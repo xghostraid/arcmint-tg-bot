@@ -2,11 +2,11 @@
  * Balances via Blockscout first (works when public Arc RPC is broken),
  * with short-timeout RPC fallback.
  */
-import { formatUnits } from 'viem';
+import { formatUnits, hexToString, type Hex } from 'viem';
 import { publicClient } from '../chain/client.js';
-import { erc20Abi } from '../chain/abis.js';
+import { erc20Abi, erc20Bytes32MetaAbi, launchFactoryAbi } from '../chain/abis.js';
 import { env } from '../config/env.js';
-import { cacheGetOrSet } from './cache.js';
+import { cacheGet, cacheSet } from './cache.js';
 
 const RPC_MS = 6_000;
 const HTTP_MS = 5_000;
@@ -100,52 +100,145 @@ export async function getUsdcBalance(address: `0x${string}`): Promise<{
   });
 }
 
+function cleanTicker(raw: unknown): string {
+  if (raw == null) return '';
+  let s = '';
+  if (typeof raw === 'string') {
+    if (raw.startsWith('0x') && raw.length === 66) {
+      try {
+        s = hexToString(raw as Hex, { size: 32 });
+      } catch {
+        s = raw;
+      }
+    } else {
+      s = raw;
+    }
+  } else {
+    s = String(raw);
+  }
+  s = s.replace(/\0/g, '').replace(/[^\w.\-$]/g, '').trim();
+  if (!s || /^token$/i.test(s) || s === '?' || s === '???') return '';
+  return s.slice(0, 24);
+}
+
+function shortTicker(token: string): string {
+  return `${token.slice(0, 6)}…${token.slice(-4)}`;
+}
+
+export function isPlaceholderSymbol(symbol: string): boolean {
+  const s = (symbol || '').trim();
+  return !s || /^token$/i.test(s) || s === '???' || s.includes('…');
+}
+
 export async function getTokenMeta(token: `0x${string}`): Promise<{
   symbol: string;
+  name: string;
   decimals: number;
 }> {
   const key = `meta:rpc:${token.toLowerCase()}`;
-  return cacheGetOrSet(key, 60_000, async () => {
-    // Optional explorer token API (skipped when host is down)
+  const hit = cacheGet<{ symbol: string; name: string; decimals: number }>(key);
+  if (hit && hit.symbol && !/^token$/i.test(hit.symbol) && !hit.symbol.includes('…')) {
+    return hit;
+  }
+
+  const client = publicClient();
+  let symbol = '';
+  let name = '';
+  let decimals = 18;
+
+  try {
+    const raw = await withTimeout(
+      client.readContract({
+        address: env.launchFactory(),
+        abi: launchFactoryAbi,
+        functionName: 'launches',
+        args: [token],
+      }) as Promise<readonly unknown[]>,
+      4_000,
+      'factory launches',
+    );
+    const arr = raw as readonly unknown[];
+    name = cleanTicker(arr?.[4]) || name;
+    symbol = cleanTicker(arr?.[5]) || symbol;
+  } catch {
+    /* not an ArcMint launch, or factory call failed */
+  }
+
+  try {
+    const [sym, nm, dec] = await withTimeout(
+      Promise.all([
+        client.readContract({
+          address: token,
+          abi: erc20Abi,
+          functionName: 'symbol',
+        }) as Promise<string>,
+        client.readContract({
+          address: token,
+          abi: erc20Abi,
+          functionName: 'name',
+        }) as Promise<string>,
+        client.readContract({
+          address: token,
+          abi: erc20Abi,
+          functionName: 'decimals',
+        }) as Promise<number>,
+      ]),
+      RPC_MS,
+      'token meta',
+    );
+    symbol = cleanTicker(sym) || symbol;
+    name = cleanTicker(nm) || name;
+    decimals = Number(dec) || 18;
+  } catch {
+    try {
+      const [sym32, nm32] = await withTimeout(
+        Promise.all([
+          client.readContract({
+            address: token,
+            abi: erc20Bytes32MetaAbi,
+            functionName: 'symbol',
+          }) as Promise<Hex>,
+          client.readContract({
+            address: token,
+            abi: erc20Bytes32MetaAbi,
+            functionName: 'name',
+          }) as Promise<Hex>,
+        ]),
+        4_000,
+        'token meta bytes32',
+      );
+      symbol = cleanTicker(sym32) || symbol;
+      name = cleanTicker(nm32) || name;
+    } catch {
+      /* */
+    }
+  }
+
+  if (!symbol) {
     try {
       const base = blockscoutBase();
-      if (!base) throw new Error('no explorer api');
-      const data = (await fetchJson(`${base}/api/v2/tokens/${token}`)) as {
-        symbol?: string;
-        decimals?: string | number;
-      };
-      if (data.symbol) {
-        return {
-          symbol: String(data.symbol).slice(0, 24),
-          decimals: Number(data.decimals ?? 18) || 18,
+      if (base) {
+        const data = (await fetchJson(`${base}/api/v2/tokens/${token}`)) as {
+          symbol?: string;
+          name?: string;
+          decimals?: string | number;
         };
+        symbol = cleanTicker(data.symbol) || symbol;
+        name = cleanTicker(data.name) || name;
+        if (data.decimals != null) decimals = Number(data.decimals) || decimals;
       }
     } catch {
       /* */
     }
-    try {
-      const client = publicClient();
-      const [symbol, decimals] = await withTimeout(
-        Promise.all([
-          client.readContract({
-            address: token,
-            abi: erc20Abi,
-            functionName: 'symbol',
-          }) as Promise<string>,
-          client.readContract({
-            address: token,
-            abi: erc20Abi,
-            functionName: 'decimals',
-          }) as Promise<number>,
-        ]),
-        RPC_MS,
-        'token meta',
-      );
-      return { symbol: String(symbol).slice(0, 24), decimals: Number(decimals) || 18 };
-    } catch {
-      return { symbol: 'TOKEN', decimals: 18 };
-    }
-  });
+  }
+
+  const meta = {
+    symbol: symbol || shortTicker(token),
+    name: name || symbol || shortTicker(token),
+    decimals,
+  };
+  if (symbol) cacheSet(key, meta, 5 * 60_000);
+  return meta;
 }
 
 export async function getTokenBalance(

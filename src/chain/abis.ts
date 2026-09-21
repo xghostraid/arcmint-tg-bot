@@ -22,6 +22,13 @@ export const erc20Abi = [
   },
   {
     type: 'function',
+    name: 'name',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'string' }],
+  },
+  {
+    type: 'function',
     name: 'allowance',
     stateMutability: 'view',
     inputs: [
@@ -49,6 +56,44 @@ export const erc20Abi = [
       { name: 'amount', type: 'uint256' },
     ],
     outputs: [{ type: 'bool' }],
+  },
+] as const;
+
+/** Older ERC-20s return bytes32 for symbol/name. */
+export const erc20Bytes32MetaAbi = [
+  {
+    type: 'function',
+    name: 'symbol',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'bytes32' }],
+  },
+  {
+    type: 'function',
+    name: 'name',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'bytes32' }],
+  },
+] as const;
+
+/** ArcMint factory `launches(token)` — name/symbol are stored on create. */
+export const launchFactoryAbi = [
+  {
+    type: 'function',
+    name: 'launches',
+    stateMutability: 'view',
+    inputs: [{ name: 'token', type: 'address' }],
+    outputs: [
+      { name: 'token', type: 'address' },
+      { name: 'pool', type: 'address' },
+      { name: 'creator', type: 'address' },
+      { name: 'createdAt', type: 'uint256' },
+      { name: 'name', type: 'string' },
+      { name: 'symbol', type: 'string' },
+      { name: 'metadataURI', type: 'string' },
+      { name: 'teamVesting', type: 'address' },
+    ],
   },
 ] as const;
 

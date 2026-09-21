@@ -9,6 +9,7 @@ import type { BotContext } from './handlers.js';
  */
 export const BOT_COMMANDS: BotCommand[] = [
   { command: 'start', description: 'Home — start trading' },
+  { command: 'status', description: 'Arc RPC — live or down' },
   { command: 'home', description: 'Home & portfolio balance' },
   { command: 'buy', description: 'Buy a token with USDC' },
   { command: 'sell', description: 'Sell token holdings' },

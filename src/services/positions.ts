@@ -607,7 +607,7 @@ export async function buildTokenCard(opts: {
     opts.owner
       ? getTokenBalance(token, opts.owner).catch(() => 0n)
       : Promise.resolve(0n),
-    getTokenMeta(token).catch(() => ({ symbol: 'TOKEN', decimals: 18 })),
+    getTokenMeta(token).catch(() => ({ symbol: '', name: '', decimals: 18 })),
     quoteUsdcToToken(token, sample, true, opts.feeExempt ?? false).catch(() => null),
     fetchTokenMetaRemote(token),
   ]);

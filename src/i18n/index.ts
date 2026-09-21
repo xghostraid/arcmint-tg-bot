@@ -77,7 +77,10 @@ const en: Dict = {
   lang_set: 'Language set to *{label}*',
   help_title: '*Commands*',
   help_body:
-    '/start or /home — home\n/wallet — wallets\n/buy `<token>` — buy menu\n/settings — slippage & language\n\nUse the *buttons on each message* (not the keyboard strip).\nOr paste a `0x` token address anytime.\n\n*Network*: Arc Mainnet `5042`',
+    '/start or /home — home\n/status — Arc RPC live or down\n/wallet — wallets\n/buy `<token>` — buy menu\n/settings — slippage & language\n\nUse the *buttons on each message* (not the keyboard strip).\nOr paste a `0x` token address anytime.\n\n*Network*: Arc Mainnet `5042`',
+  chain_offline:
+    '⚠️ *Arc RPC is down* — no public node is serving blocks yet.\nWallets still work. Quotes, buys, and the bridge pause until the chain answers.',
+  chain_offline_short: 'Arc RPC is down. Try again when the chain is live.',
   home_no_wallet:
     '*ArcTradeBot*\nArc Mainnet\n\nNo wallet yet.\nCreate or import one below to start.',
   home_balance: '*Balance*',
