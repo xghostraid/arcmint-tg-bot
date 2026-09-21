@@ -58,6 +58,12 @@ export function isArcLive(): boolean {
   return last.live && Date.now() - last.checkedAt < INTERVAL_MS * 4;
 }
 
+/** Probe if we have no fresh result (webhook lambdas never run the PM2 health loop). */
+export async function ensureArcHealth(): Promise<ArcHealth> {
+  if (last.checkedAt && Date.now() - last.checkedAt < INTERVAL_MS) return last;
+  return probeArcHealth();
+}
+
 export async function probeArcHealth(): Promise<ArcHealth> {
   const rpcHost = hostOf(env.rpcUrl());
   try {

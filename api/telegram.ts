@@ -2,6 +2,7 @@
  * Telegram webhook — 24/7 on Vercel (replaces Railway polling).
  */
 import { createBot } from '../src/bot/handlers.js';
+import { ensureArcHealth } from '../src/chain/health.js';
 import type { Update } from 'grammy/types';
 
 type Req = { method?: string; body?: unknown; headers?: Record<string, string | string[] | undefined> };
@@ -39,6 +40,7 @@ export default async function handler(req: Req, res: Res): Promise<void> {
   }
   try {
     const b = await bot();
+    await ensureArcHealth();
     await b.handleUpdate(req.body as Update);
     res.status(200).json({ ok: true });
   } catch (e) {

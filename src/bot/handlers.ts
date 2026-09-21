@@ -2,7 +2,7 @@ import { Bot, InputFile, type Context, session, type SessionFlavor } from 'gramm
 import { formatUnits, isAddress, getAddress, type Hex } from 'viem';
 import { env } from '../config/env.js';
 import { addressUrl } from '../chain/client.js';
-import { formatArcStatus, getArcHealth, isArcLive } from '../chain/health.js';
+import { ensureArcHealth, formatArcStatus, getArcHealth, isArcLive } from '../chain/health.js';
 import {
   addWallet,
   ensureUser,
@@ -184,7 +184,7 @@ async function homeText(tgId: number): Promise<string> {
     cashStr = '—';
   }
 
-  const health = getArcHealth();
+  const health = await ensureArcHealth();
   const rpcLine = health.live
     ? `_Arc Mainnet \`${env.chainId}\` · live_`
     : t(lang, 'chain_offline');
@@ -203,6 +203,7 @@ async function homeText(tgId: number): Promise<string> {
 }
 
 async function requireArcLive(ctx: BotContext): Promise<boolean> {
+  await ensureArcHealth();
   if (isArcLive()) return true;
   await ctx.reply(t(await langOf(ctx), 'chain_offline'), {
     parse_mode: 'Markdown',
@@ -327,6 +328,7 @@ export function createBot(token: string): Bot<BotContext> {
   });
 
   bot.command('status', async (ctx) => {
+    await ensureArcHealth();
     await ctx.reply(formatArcStatus({ admin: env.isAdmin(ctx.from?.id) }), {
       parse_mode: 'Markdown',
       reply_markup: mainMenu(await hasAnyWallet(ctx.from!.id), await langOf(ctx)),
