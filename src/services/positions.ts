@@ -1,4 +1,4 @@
-import { formatUnits, type Hex } from 'viem';
+import { formatUnits, parseAbiItem, type Hex } from 'viem';
 import { env } from '../config/env.js';
 import { publicClient } from '../chain/client.js';
 import { erc20Abi, launchFactoryAbi } from '../chain/abis.js';
@@ -252,6 +252,22 @@ async function fetchJsonTimed(url: string, ms: number): Promise<unknown | null> 
   }
 }
 
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timeout`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
 async function dexScreenerStats(address: string): Promise<{
   name?: string;
   symbol?: string;
@@ -263,14 +279,15 @@ async function dexScreenerStats(address: string): Promise<{
     4_000,
   )) as { pairs?: Array<Record<string, unknown>> } | null;
   const want = address.toLowerCase();
-  const pairs = (d?.pairs || []).filter((p) => {
+  const matching = (d?.pairs || []).filter((p) => {
     const base = p.baseToken as { address?: string } | undefined;
-    const chain = String(p.chainId || '').toLowerCase();
-    return (
-      (base?.address || '').toLowerCase() === want &&
-      (chain === 'arc' || chain === '5042' || chain.includes('arc'))
-    );
+    return (base?.address || '').toLowerCase() === want;
   });
+  const arc = matching.filter((p) => {
+    const chain = String(p.chainId || '').toLowerCase();
+    return chain === 'arc' || chain === '5042' || chain.includes('arc');
+  });
+  const pairs = arc.length ? arc : matching;
   if (!pairs.length) return null;
   pairs.sort(
     (a, b) =>
@@ -289,45 +306,209 @@ async function dexScreenerStats(address: string): Promise<{
   };
 }
 
-async function geckoHolders(address: string): Promise<number | null> {
+async function geckoStats(address: string): Promise<{
+  holders: number | null;
+  marketCapUsdc: number | null;
+  name?: string;
+  symbol?: string;
+}> {
+  const addr = address.toLowerCase();
+  const [info, token] = await Promise.all([
+    fetchJsonTimed(
+      `https://api.geckoterminal.com/api/v2/networks/arc/tokens/${addr}/info`,
+      4_000,
+    ) as Promise<{ data?: { attributes?: Record<string, unknown> } } | null>,
+    fetchJsonTimed(
+      `https://api.geckoterminal.com/api/v2/networks/arc/tokens/${addr}`,
+      4_000,
+    ) as Promise<{ data?: { attributes?: Record<string, unknown> } } | null>,
+  ]);
+  const infoA = info?.data?.attributes || {};
+  const tokA = token?.data?.attributes || {};
+  const holders = Number((infoA.holders as { count?: number } | undefined)?.count);
+  const mc = Number(tokA.market_cap_usd || tokA.fdv_usd || 0);
+  return {
+    holders: Number.isFinite(holders) && holders > 0 ? holders : null,
+    marketCapUsdc: Number.isFinite(mc) && mc > 0 ? mc : null,
+    name: typeof tokA.name === 'string' ? tokA.name : undefined,
+    symbol: typeof tokA.symbol === 'string' ? tokA.symbol : undefined,
+  };
+}
+
+async function arcmintStats(address: string): Promise<{
+  name?: string;
+  symbol?: string;
+  marketCapUsdc?: number;
+  holders?: number;
+} | null> {
   const d = (await fetchJsonTimed(
-    `https://api.geckoterminal.com/api/v2/networks/arc/tokens/${address.toLowerCase()}/info`,
+    `https://arcmint.fun/api/tokens/${address}`,
     4_000,
-  )) as { data?: { attributes?: { holders?: { count?: number } } } } | null;
-  const n = Number(d?.data?.attributes?.holders?.count);
-  return Number.isFinite(n) && n > 0 ? n : null;
+  )) as { token?: Record<string, unknown>; error?: string } | null;
+  const t = d?.token;
+  if (!t || typeof t !== 'object') return null;
+  const rawMc = Number(t.mcapUsdc);
+  // Indexer stores 6-decimal USDC integers ("750000" → $0.75)
+  const mc =
+    Number.isFinite(rawMc) && rawMc > 0 ? rawMc / 1e6 : null;
+  const holders = Number(t.holderCount);
+  return {
+    name: typeof t.name === 'string' ? t.name : undefined,
+    symbol: typeof t.symbol === 'string' ? t.symbol : undefined,
+    marketCapUsdc: mc && mc > 0 ? mc : undefined,
+    holders: Number.isFinite(holders) && holders > 0 ? holders : undefined,
+  };
 }
 
 async function onChainSupply(token: `0x${string}`): Promise<bigint | null> {
   try {
-    const v = (await publicClient().readContract({
-      address: token,
-      abi: erc20Abi,
-      functionName: 'totalSupply',
-    })) as bigint;
+    const v = (await withTimeout(
+      publicClient().readContract({
+        address: token,
+        abi: erc20Abi,
+        functionName: 'totalSupply',
+      }) as Promise<bigint>,
+      5_000,
+      'totalSupply',
+    )) as bigint;
     return v >= 0n ? v : null;
   } catch {
     return null;
   }
 }
 
-async function curveMarketCapUsdc(token: `0x${string}`): Promise<number | null> {
+type FactoryLaunch = {
+  pool: `0x${string}`;
+  creator: `0x${string}`;
+  createdAt: number;
+  name: string;
+  symbol: string;
+  mcapUsdc: number | null;
+};
+
+async function factoryLaunch(token: `0x${string}`): Promise<FactoryLaunch | null> {
   try {
-    const raw = (await publicClient().readContract({
-      address: env.launchFactory(),
-      abi: launchFactoryAbi,
-      functionName: 'launches',
-      args: [token],
-    })) as readonly unknown[];
+    const raw = (await withTimeout(
+      publicClient().readContract({
+        address: env.launchFactory(),
+        abi: launchFactoryAbi,
+        functionName: 'launches',
+        args: [token],
+      }) as Promise<readonly unknown[]>,
+      4_000,
+      'launches',
+    )) as readonly unknown[];
     const pool = String(raw?.[1] || '');
     if (!pool.startsWith('0x') || pool.toLowerCase() === ZERO) return null;
-    const mcap = (await publicClient().readContract({
-      address: pool as `0x${string}`,
-      abi: poolMcapAbi,
-      functionName: 'marketCapUsdc',
-    })) as bigint;
-    const n = Number(formatUnits(mcap, 6));
-    return Number.isFinite(n) && n > 0 ? n : null;
+    const creator = String(raw?.[2] || ZERO) as `0x${string}`;
+    const createdAt = Number(raw?.[3] || 0);
+    const name = String(raw?.[4] || '');
+    const symbol = String(raw?.[5] || '');
+    let mcapUsdc: number | null = null;
+    try {
+      const mcap = (await withTimeout(
+        publicClient().readContract({
+          address: pool as `0x${string}`,
+          abi: poolMcapAbi,
+          functionName: 'marketCapUsdc',
+        }) as Promise<bigint>,
+        4_000,
+        'curve mcap',
+      )) as bigint;
+      const n = Number(formatUnits(mcap, 6));
+      if (Number.isFinite(n) && n > 0) mcapUsdc = n;
+    } catch {
+      /* */
+    }
+    return { pool: pool as `0x${string}`, creator, createdAt, name, symbol, mcapUsdc };
+  } catch {
+    return null;
+  }
+}
+
+const TRANSFER_EVENT = parseAbiItem(
+  'event Transfer(address indexed from, address indexed to, uint256 value)',
+);
+
+const FACTORY_DEPLOY_BLOCK = 21_145_534n;
+
+async function blockNearUnix(ts: number): Promise<bigint | null> {
+  if (!ts || ts < 1_700_000_000) return null;
+  try {
+    const client = publicClient();
+    const latest = await withTimeout(client.getBlockNumber(), 2_000, 'block');
+    const [start, tip] = await Promise.all([
+      withTimeout(client.getBlock({ blockNumber: FACTORY_DEPLOY_BLOCK }), 2_500, 'b0'),
+      withTimeout(client.getBlock({ blockNumber: latest }), 2_500, 'b1'),
+    ]);
+    const t0 = Number(start.timestamp);
+    const t1 = Number(tip.timestamp);
+    if (!(t1 > t0)) return latest;
+    const frac = Math.min(1, Math.max(0, (ts - t0) / (t1 - t0)));
+    const est = Number(FACTORY_DEPLOY_BLOCK) + Math.floor(frac * Number(latest - FACTORY_DEPLOY_BLOCK));
+    return BigInt(Math.max(Number(FACTORY_DEPLOY_BLOCK), est - 2_000));
+  } catch {
+    return null;
+  }
+}
+
+/** Unique Transfer from/to. Needs a tight fromBlock — Arc RPC caps log range at ~9k. */
+async function holdersFromTransfers(
+  token: `0x${string}`,
+  fromBlock: bigint | null,
+): Promise<number | null> {
+  if (fromBlock == null) return null;
+  try {
+    const client = publicClient();
+    const latest = await withTimeout(client.getBlockNumber(), 2_000, 'block');
+    let from = fromBlock;
+    const maxSpan = 8_000n;
+    if (latest > from && latest - from > maxSpan) {
+      // Walk forward in 8k chunks from launch, cap 6 requests
+      const set = new Set<string>();
+      let cursor = from;
+      for (let i = 0; i < 6 && cursor <= latest; i++) {
+        const to = cursor + maxSpan > latest ? latest : cursor + maxSpan;
+        try {
+          const logs = await withTimeout(
+            client.getLogs({
+              address: token,
+              event: TRANSFER_EVENT,
+              fromBlock: cursor,
+              toBlock: to,
+            }),
+            2_000,
+            'transfer logs',
+          );
+          for (const log of logs) {
+            const args = log.args as { from?: string; to?: string };
+            if (args.from && args.from.toLowerCase() !== ZERO) set.add(args.from.toLowerCase());
+            if (args.to && args.to.toLowerCase() !== ZERO) set.add(args.to.toLowerCase());
+          }
+        } catch {
+          /* next chunk */
+        }
+        cursor = to + 1n;
+      }
+      return set.size > 0 ? set.size : null;
+    }
+    const logs = await withTimeout(
+      client.getLogs({
+        address: token,
+        event: TRANSFER_EVENT,
+        fromBlock: from,
+        toBlock: 'latest',
+      }),
+      2_500,
+      'transfer logs',
+    );
+    const set = new Set<string>();
+    for (const log of logs) {
+      const args = log.args as { from?: string; to?: string };
+      if (args.from && args.from.toLowerCase() !== ZERO) set.add(args.from.toLowerCase());
+      if (args.to && args.to.toLowerCase() !== ZERO) set.add(args.to.toLowerCase());
+    }
+    return set.size > 0 ? set.size : null;
   } catch {
     return null;
   }
@@ -335,65 +516,43 @@ async function curveMarketCapUsdc(token: `0x${string}`): Promise<number | null> 
 
 async function fetchTokenMetaRemote(address: `0x${string}`): Promise<TokenMetaRemote | null> {
   const key = `meta:${address.toLowerCase()}`;
-  const hit = cacheGet<TokenMetaRemote | null>(key);
+  const hit = cacheGet<TokenMetaRemote>(key);
   if (hit && (hit.marketCapUsdc || hit.holders || hit.totalSupply)) return hit;
 
-  const [dex, holders, supply, curveMc, bs] = await Promise.all([
+  const [dex, gecko, mint, supply, launch] = await Promise.all([
     dexScreenerStats(address),
-    geckoHolders(address),
+    geckoStats(address),
+    arcmintStats(address),
     onChainSupply(address),
-    curveMarketCapUsdc(address),
-    (async (): Promise<{
-      name?: string;
-      symbol?: string;
-      decimals?: number;
-      totalSupply?: bigint | null;
-      holders?: number | null;
-    } | null> => {
-      const base = blockscoutBase();
-      if (!base) return null;
-      const d = (await fetchJsonTimed(`${base}/api/v2/tokens/${address}`, 3_000)) as {
-        name?: string;
-        symbol?: string;
-        decimals?: string;
-        total_supply?: string;
-        holders_count?: string | number;
-      } | null;
-      if (!d) return null;
-      let totalSupply: bigint | null = null;
-      try {
-        if (d.total_supply) totalSupply = BigInt(d.total_supply);
-      } catch {
-        totalSupply = null;
-      }
-      const h =
-        d.holders_count != null && d.holders_count !== '' ? Number(d.holders_count) : null;
-      return {
-        name: d.name,
-        symbol: d.symbol,
-        decimals: Number(d.decimals ?? 18) || 18,
-        totalSupply,
-        holders: Number.isFinite(h as number) ? (h as number) : null,
-      };
-    })(),
+    factoryLaunch(address),
   ]);
 
-  const totalSupply = supply ?? bs?.totalSupply ?? null;
-  const marketCapUsdc = dex?.marketCapUsdc ?? curveMc ?? null;
-  const holderN = holders ?? bs?.holders ?? null;
-  const symbol = (dex?.symbol || bs?.symbol || '').slice(0, 24);
-  const name = (dex?.name || bs?.name || symbol).slice(0, 48);
-  if (!marketCapUsdc && holderN == null && totalSupply == null && !symbol) return null;
+  let holders = gecko.holders ?? mint?.holders ?? null;
+  if (holders == null && launch?.createdAt) {
+    const from = await blockNearUnix(launch.createdAt);
+    holders = await holdersFromTransfers(address, from);
+  }
+
+  const totalSupply = supply;
+  const marketCapUsdc =
+    dex?.marketCapUsdc ??
+    gecko.marketCapUsdc ??
+    launch?.mcapUsdc ??
+    mint?.marketCapUsdc ??
+    null;
+  const symbol = (dex?.symbol || gecko.symbol || mint?.symbol || launch?.symbol || '').slice(0, 24);
+  const name = (dex?.name || gecko.name || mint?.name || launch?.name || symbol).slice(0, 48);
+  if (!marketCapUsdc && holders == null && totalSupply == null && !symbol) return null;
 
   const meta: TokenMetaRemote = {
     name: name || 'Token',
-    symbol: symbol || '???',
-    decimals: bs?.decimals || 18,
+    symbol: symbol || '',
+    decimals: 18,
     totalSupply,
-    holders: holderN,
+    holders,
     marketCapUsdc,
   };
-  cacheSet(key, meta, marketCapUsdc || holderN ? 45_000 : 8_000);
+  cacheSet(key, meta, marketCapUsdc || holders ? 45_000 : 10_000);
   return meta;
 }
 
@@ -745,9 +904,11 @@ export async function buildTokenCard(opts: {
     fetchTokenMetaRemote(token),
   ]);
 
-  const symbol = remote?.symbol || meta.symbol || 'TOKEN';
-  const decimals = remote?.decimals || meta.decimals || 18;
-  const name = remote?.name || symbol;
+  const symbol =
+    (remote?.symbol && remote.symbol !== '???') ? remote.symbol : meta.symbol || 'TOKEN';
+  const decimals = meta.decimals || remote?.decimals || 18;
+  const name =
+    (remote?.name && remote.name !== 'Token') ? remote.name : meta.name || symbol;
 
   let valueUsdc = 0;
   let priceUsdc: number | null = null;
