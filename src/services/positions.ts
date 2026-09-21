@@ -1,5 +1,7 @@
 import { formatUnits, type Hex } from 'viem';
 import { env } from '../config/env.js';
+import { publicClient } from '../chain/client.js';
+import { erc20Abi, launchFactoryAbi } from '../chain/abis.js';
 import { getTokenBalance, getTokenMeta, getUsdcBalance } from './balances.js';
 import {
   formatPnlShort,
@@ -14,7 +16,7 @@ import {
   quoteTokenToUsdc,
   quoteUsdcToToken,
 } from './swap.js';
-import { cacheGetOrSet } from './cache.js';
+import { cacheGet, cacheGetOrSet, cacheSet } from './cache.js';
 
 export type TokenHolding = {
   address: `0x${string}`;
@@ -219,51 +221,180 @@ type TokenMetaRemote = {
   decimals: number;
   totalSupply: bigint | null;
   holders: number | null;
+  marketCapUsdc: number | null;
 };
+
+const ZERO = '0x0000000000000000000000000000000000000000';
+const poolMcapAbi = [
+  {
+    type: 'function',
+    name: 'marketCapUsdc',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'uint256' }],
+  },
+] as const;
+
+async function fetchJsonTimed(url: string, ms: number): Promise<unknown | null> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function dexScreenerStats(address: string): Promise<{
+  name?: string;
+  symbol?: string;
+  marketCapUsdc?: number;
+  priceUsd?: number;
+} | null> {
+  const d = (await fetchJsonTimed(
+    `https://api.dexscreener.com/latest/dex/tokens/${address}`,
+    4_000,
+  )) as { pairs?: Array<Record<string, unknown>> } | null;
+  const want = address.toLowerCase();
+  const pairs = (d?.pairs || []).filter((p) => {
+    const base = p.baseToken as { address?: string } | undefined;
+    const chain = String(p.chainId || '').toLowerCase();
+    return (
+      (base?.address || '').toLowerCase() === want &&
+      (chain === 'arc' || chain === '5042' || chain.includes('arc'))
+    );
+  });
+  if (!pairs.length) return null;
+  pairs.sort(
+    (a, b) =>
+      Number((b.liquidity as { usd?: number } | undefined)?.usd || 0) -
+      Number((a.liquidity as { usd?: number } | undefined)?.usd || 0),
+  );
+  const p = pairs[0];
+  const base = p.baseToken as { name?: string; symbol?: string };
+  const mc = Number(p.marketCap || p.fdv || 0);
+  const price = Number(p.priceUsd || 0);
+  return {
+    name: base?.name,
+    symbol: base?.symbol,
+    marketCapUsdc: Number.isFinite(mc) && mc > 0 ? mc : undefined,
+    priceUsd: Number.isFinite(price) && price > 0 ? price : undefined,
+  };
+}
+
+async function geckoHolders(address: string): Promise<number | null> {
+  const d = (await fetchJsonTimed(
+    `https://api.geckoterminal.com/api/v2/networks/arc/tokens/${address.toLowerCase()}/info`,
+    4_000,
+  )) as { data?: { attributes?: { holders?: { count?: number } } } } | null;
+  const n = Number(d?.data?.attributes?.holders?.count);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+async function onChainSupply(token: `0x${string}`): Promise<bigint | null> {
+  try {
+    const v = (await publicClient().readContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: 'totalSupply',
+    })) as bigint;
+    return v >= 0n ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+async function curveMarketCapUsdc(token: `0x${string}`): Promise<number | null> {
+  try {
+    const raw = (await publicClient().readContract({
+      address: env.launchFactory(),
+      abi: launchFactoryAbi,
+      functionName: 'launches',
+      args: [token],
+    })) as readonly unknown[];
+    const pool = String(raw?.[1] || '');
+    if (!pool.startsWith('0x') || pool.toLowerCase() === ZERO) return null;
+    const mcap = (await publicClient().readContract({
+      address: pool as `0x${string}`,
+      abi: poolMcapAbi,
+      functionName: 'marketCapUsdc',
+    })) as bigint;
+    const n = Number(formatUnits(mcap, 6));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
 
 async function fetchTokenMetaRemote(address: `0x${string}`): Promise<TokenMetaRemote | null> {
   const key = `meta:${address.toLowerCase()}`;
-  return cacheGetOrSet(key, 60_000, async () => {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 4_000);
-    try {
+  const hit = cacheGet<TokenMetaRemote | null>(key);
+  if (hit && (hit.marketCapUsdc || hit.holders || hit.totalSupply)) return hit;
+
+  const [dex, holders, supply, curveMc, bs] = await Promise.all([
+    dexScreenerStats(address),
+    geckoHolders(address),
+    onChainSupply(address),
+    curveMarketCapUsdc(address),
+    (async (): Promise<{
+      name?: string;
+      symbol?: string;
+      decimals?: number;
+      totalSupply?: bigint | null;
+      holders?: number | null;
+    } | null> => {
       const base = blockscoutBase();
       if (!base) return null;
-      const res = await fetch(`${base}/api/v2/tokens/${address}`, {
-        signal: ctrl.signal,
-        headers: { accept: 'application/json' },
-      });
-      if (!res.ok) return null;
-      const d = (await res.json()) as {
+      const d = (await fetchJsonTimed(`${base}/api/v2/tokens/${address}`, 3_000)) as {
         name?: string;
         symbol?: string;
         decimals?: string;
         total_supply?: string;
         holders_count?: string | number;
-      };
+      } | null;
+      if (!d) return null;
       let totalSupply: bigint | null = null;
       try {
         if (d.total_supply) totalSupply = BigInt(d.total_supply);
       } catch {
         totalSupply = null;
       }
-      const holders =
-        d.holders_count != null && d.holders_count !== ''
-          ? Number(d.holders_count)
-          : null;
+      const h =
+        d.holders_count != null && d.holders_count !== '' ? Number(d.holders_count) : null;
       return {
-        name: (d.name || d.symbol || 'Token').slice(0, 48),
-        symbol: (d.symbol || '???').slice(0, 24),
+        name: d.name,
+        symbol: d.symbol,
         decimals: Number(d.decimals ?? 18) || 18,
         totalSupply,
-        holders: Number.isFinite(holders as number) ? (holders as number) : null,
+        holders: Number.isFinite(h as number) ? (h as number) : null,
       };
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(t);
-    }
-  });
+    })(),
+  ]);
+
+  const totalSupply = supply ?? bs?.totalSupply ?? null;
+  const marketCapUsdc = dex?.marketCapUsdc ?? curveMc ?? null;
+  const holderN = holders ?? bs?.holders ?? null;
+  const symbol = (dex?.symbol || bs?.symbol || '').slice(0, 24);
+  const name = (dex?.name || bs?.name || symbol).slice(0, 48);
+  if (!marketCapUsdc && holderN == null && totalSupply == null && !symbol) return null;
+
+  const meta: TokenMetaRemote = {
+    name: name || 'Token',
+    symbol: symbol || '???',
+    decimals: bs?.decimals || 18,
+    totalSupply,
+    holders: holderN,
+    marketCapUsdc,
+  };
+  cacheSet(key, meta, marketCapUsdc || holderN ? 45_000 : 8_000);
+  return meta;
 }
 
 const ARC_USDC_DECIMALS = 6;
@@ -409,16 +540,18 @@ export async function enrichPositions(
         if (Number.isFinite(implied) && implied > 0) priceUsdc = implied;
       }
 
-      let marketCapUsdc: number | null = null;
+      let marketCapUsdc: number | null = remote?.marketCapUsdc ?? null;
       let totalSupplyHuman: string | null = null;
-      if (remote?.totalSupply != null && priceUsdc != null && priceUsdc > 0) {
-        const supplyHuman = Number(formatUnits(remote.totalSupply, rDec));
-        if (Number.isFinite(supplyHuman) && supplyHuman > 0) {
-          marketCapUsdc = priceUsdc * supplyHuman;
-          if (!Number.isFinite(marketCapUsdc) || marketCapUsdc > 1e15) {
-            marketCapUsdc = null;
+      if (remote?.totalSupply != null) {
+        totalSupplyHuman = fmtAmount(remote.totalSupply, rDec);
+        if (marketCapUsdc == null && priceUsdc != null && priceUsdc > 0) {
+          const supplyHuman = Number(formatUnits(remote.totalSupply, rDec));
+          if (Number.isFinite(supplyHuman) && supplyHuman > 0) {
+            marketCapUsdc = priceUsdc * supplyHuman;
+            if (!Number.isFinite(marketCapUsdc) || marketCapUsdc > 1e15) {
+              marketCapUsdc = null;
+            }
           }
-          totalSupplyHuman = fmtAmount(remote.totalSupply, rDec);
         }
       }
 
@@ -645,8 +778,8 @@ export async function buildTokenCard(opts: {
     }
   }
 
-  let marketCapUsdc: number | null = null;
-  if (remote?.totalSupply != null && priceUsdc != null && priceUsdc > 0) {
+  let marketCapUsdc: number | null = remote?.marketCapUsdc ?? null;
+  if (marketCapUsdc == null && remote?.totalSupply != null && priceUsdc != null && priceUsdc > 0) {
     const supplyHuman = Number(formatUnits(remote.totalSupply, decimals));
     if (Number.isFinite(supplyHuman) && supplyHuman > 0) {
       marketCapUsdc = priceUsdc * supplyHuman;
