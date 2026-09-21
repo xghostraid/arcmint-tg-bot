@@ -174,7 +174,7 @@ async function runBotOnce(): Promise<void> {
 
   try {
     const { listAllWalletCount, getDbPath } = await import('./db/store.js');
-    console.log(`[db] path=${getDbPath()} wallets=${listAllWalletCount()}`);
+    console.log(`[db] path=${getDbPath()} wallets=${await listAllWalletCount()}`);
   } catch {
     /* */
   }

@@ -86,7 +86,7 @@ export async function fetchWalletHoldings(
       if (tgId != null) {
         for (const h of fromExplorer) {
           if (h.address.toLowerCase() !== env.usdc().toLowerCase()) {
-            rememberToken(tgId, h.address, h.symbol, h.decimals);
+            await rememberToken(tgId, h.address, h.symbol, h.decimals);
           }
         }
       }
@@ -181,7 +181,7 @@ async function fetchViaRpc(
     /* skip */
   }
 
-  const known = tgId != null ? listKnownTokensForUser(tgId) : [];
+  const known = tgId != null ? await listKnownTokensForUser(tgId) : [];
   await Promise.all(
     known.map(async (t) => {
       try {
@@ -666,7 +666,7 @@ export async function enrichPositions(
             /* */
           }
         }
-        const pnl = getPositionPnl(tgId, h.address, h.raw, valueUsdc);
+        const pnl = await getPositionPnl(tgId, h.address, h.raw, valueUsdc);
         return {
           ...h,
           name: h.name || h.symbol,
@@ -714,7 +714,7 @@ export async function enrichPositions(
         }
       }
 
-      const pnl = getPositionPnl(tgId, h.address, h.raw, valueUsdc);
+      const pnl = await getPositionPnl(tgId, h.address, h.raw, valueUsdc);
 
       return {
         ...h,
@@ -948,7 +948,7 @@ export async function buildTokenCard(opts: {
     }
   }
 
-  const pnl = getPositionPnl(tgId, token, raw, valueUsdc);
+  const pnl = await getPositionPnl(tgId, token, raw, valueUsdc);
   const holders =
     remote?.holders != null ? remote.holders.toLocaleString() : '—';
   const price = priceUsdc != null && priceUsdc > 0 ? fmtUsd(priceUsdc) : '—';

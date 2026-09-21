@@ -140,17 +140,17 @@ function short(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-function userLang(tgId: number) {
-  return normalizeLang(getLang(tgId));
+async function userLang(tgId: number) {
+  return normalizeLang(await getLang(tgId));
 }
 
-function langOf(ctx: BotContext) {
-  return userLang(ctx.from!.id);
+async function langOf(ctx: BotContext) {
+  return await userLang(ctx.from!.id);
 }
 
-function settingsText(tgId: number): string {
-  const lang = userLang(tgId);
-  const slip = getSlippage(tgId);
+async function settingsText(tgId: number): Promise<string> {
+  const lang = await userLang(tgId);
+  const slip = await getSlippage(tgId);
   const label = LANG_LABELS[lang] ?? LANG_LABELS.en;
   return [
     t(lang, 'settings_title'),
@@ -160,8 +160,8 @@ function settingsText(tgId: number): string {
 }
 
 async function homeText(tgId: number): Promise<string> {
-  const lang = userLang(tgId);
-  const w = getActiveWallet(tgId);
+  const lang = await userLang(tgId);
+  const w = await getActiveWallet(tgId);
   if (!w) {
     const down = getArcHealth().live ? '' : `\n\n${t(lang, 'chain_offline')}`;
     return `${t(lang, 'home_no_wallet')}${down}`;
@@ -204,15 +204,16 @@ async function homeText(tgId: number): Promise<string> {
 
 async function requireArcLive(ctx: BotContext): Promise<boolean> {
   if (isArcLive()) return true;
-  await ctx.reply(t(langOf(ctx), 'chain_offline'), {
+  await ctx.reply(t(await langOf(ctx), 'chain_offline'), {
     parse_mode: 'Markdown',
-    reply_markup: mainMenu(hasAnyWallet(ctx.from!.id), langOf(ctx)),
+    reply_markup: mainMenu(await hasAnyWallet(ctx.from!.id), await langOf(ctx)),
   });
   return false;
 }
 
-function hasAnyWallet(tgId: number): boolean {
-  return listWallets(tgId).length > 0;
+async function hasAnyWallet(tgId: number): Promise<boolean> {
+  const rows = await listWallets(tgId);
+  return rows.length > 0;
 }
 
 /** Dismiss leftover reply keyboard — fire-and-forget (never block UX). */
@@ -231,9 +232,9 @@ async function sendHome(ctx: BotContext, opts?: { edit?: boolean }): Promise<voi
   ctx.session.expect = null;
   ctx.session.pendingToken = undefined;
   const id = ctx.from!.id;
-  const hasWallet = hasAnyWallet(id);
+  const hasWallet = await hasAnyWallet(id);
   const text = await homeText(id);
-  const menu = mainMenu(hasWallet, userLang(id));
+  const menu = mainMenu(hasWallet, await userLang(id));
 
   // Inline buttons under the message (in-chat) — never the system keyboard strip
   if (opts?.edit && ctx.callbackQuery) {
@@ -267,10 +268,10 @@ export function createBot(token: string): Bot<BotContext> {
 
   bot.use(async (ctx, next) => {
     if (!allowed(ctx)) {
-      await ctx.reply(t(langOf(ctx), 'private_bot'));
+      await ctx.reply(t(await langOf(ctx), 'private_bot'));
       return;
     }
-    if (ctx.from) ensureUser(ctx.from.id);
+    if (ctx.from) await ensureUser(ctx.from.id);
     // Never let a handler hang forever (RPC freezes felt like "bot dead")
     try {
       await Promise.race([
@@ -283,7 +284,7 @@ export function createBot(token: string): Bot<BotContext> {
       console.error('[bot] handler timeout/error:', e);
       try {
         await ctx.reply('Took too long. Try again.', {
-          reply_markup: mainMenu(hasAnyWallet(ctx.from!.id), langOf(ctx)),
+          reply_markup: mainMenu(await hasAnyWallet(ctx.from!.id), await langOf(ctx)),
         });
       } catch {
         /* */
@@ -305,11 +306,11 @@ export function createBot(token: string): Bot<BotContext> {
       }
 
       // /start ref_alice | ref_123456789 | alice — bind referrer once
-      const refId = resolveReferrerFromPayload(arg);
+      const refId = await resolveReferrerFromPayload(arg);
       if (refId) {
-        const bound = trySetReferrer(ctx.from.id, refId);
+        const bound = await trySetReferrer(ctx.from.id, refId);
         if (bound) {
-          const who = getRefCode(refId) || String(refId);
+          const who = await getRefCode(refId) || String(refId);
           await ctx.reply(
             `✅ Referral linked to *${who.replace(/[_*`]/g, '')}*.`,
             { parse_mode: 'Markdown' },
@@ -328,17 +329,17 @@ export function createBot(token: string): Bot<BotContext> {
   bot.command('status', async (ctx) => {
     await ctx.reply(formatArcStatus({ admin: env.isAdmin(ctx.from?.id) }), {
       parse_mode: 'Markdown',
-      reply_markup: mainMenu(hasAnyWallet(ctx.from!.id), langOf(ctx)),
+      reply_markup: mainMenu(await hasAnyWallet(ctx.from!.id), await langOf(ctx)),
     });
   });
 
   bot.command('help', async (ctx) => {
-    const lang = langOf(ctx);
+    const lang = await langOf(ctx);
     await ctx.reply(
       [t(lang, 'help_title'), t(lang, 'help_body')].join('\n'),
       {
         parse_mode: 'Markdown',
-        reply_markup: mainMenu(hasAnyWallet(ctx.from!.id), lang),
+        reply_markup: mainMenu(await hasAnyWallet(ctx.from!.id), lang),
       },
     );
   });
@@ -349,9 +350,9 @@ export function createBot(token: string): Bot<BotContext> {
 
   bot.command('settings', async (ctx) => {
     const id = ctx.from!.id;
-    const lang = userLang(id);
-    const slip = getSlippage(id);
-    await ctx.reply(settingsText(id), {
+    const lang = await userLang(id);
+    const slip = await getSlippage(id);
+    await ctx.reply(await settingsText(id), {
       parse_mode: 'Markdown',
       reply_markup: settingsMenu(slip, lang, { isAdmin: env.isAdmin(id) }),
     });
@@ -369,9 +370,9 @@ export function createBot(token: string): Bot<BotContext> {
       return;
     }
     ctx.session.expect = 'buy_token';
-    await ctx.reply(t(langOf(ctx), 'send_token_buy_cmd'), {
+    await ctx.reply(t(await langOf(ctx), 'send_token_buy_cmd'), {
       parse_mode: 'Markdown',
-      reply_markup: cancelOnly('menu:back', langOf(ctx)),
+      reply_markup: cancelOnly('menu:back', await langOf(ctx)),
     });
   });
 
@@ -435,9 +436,9 @@ export function createBot(token: string): Bot<BotContext> {
 
     if (data === 'menu:buy') {
       ctx.session.expect = 'buy_token';
-      await ctx.reply(t(langOf(ctx), 'send_token_buy'), {
+      await ctx.reply(t(await langOf(ctx), 'send_token_buy'), {
         parse_mode: 'Markdown',
-        reply_markup: cancelOnly('menu:back', langOf(ctx)),
+        reply_markup: cancelOnly('menu:back', await langOf(ctx)),
       });
       return;
     }
@@ -471,7 +472,7 @@ export function createBot(token: string): Bot<BotContext> {
       ctx.session.expect = 'watch_token';
       await ctx.reply('Send a *token contract* to add to your watchlist (`0x…`):', {
         parse_mode: 'Markdown',
-        reply_markup: cancelOnly('menu:watchlist', langOf(ctx)),
+        reply_markup: cancelOnly('menu:watchlist', await langOf(ctx)),
       });
       return;
     }
@@ -486,14 +487,14 @@ export function createBot(token: string): Bot<BotContext> {
       } catch {
         /* */
       }
-      const added = addToWatchlist(id, addr, symbol);
+      const added = await addToWatchlist(id, addr, symbol);
       await ctx.reply(
         added
           ? `⭐ Added *$${symbol}* to watchlist`
           : `⭐ *$${symbol}* already on your watchlist`,
         {
           parse_mode: 'Markdown',
-          reply_markup: buyPresets(addr, langOf(ctx), {
+          reply_markup: buyPresets(addr, await langOf(ctx), {
             hasBalance: false,
             watching: true,
           }),
@@ -506,14 +507,14 @@ export function createBot(token: string): Bot<BotContext> {
       const token = data.slice('watch_rm:'.length);
       if (!token || !isAddress(token)) return;
       const addr = getAddress(token);
-      removeFromWatchlist(id, addr);
+      await removeFromWatchlist(id, addr);
       await ctx.reply(`Removed from watchlist.`, {
         reply_markup: watchlistMenu(
-          listWatchlist(id).map((w) => ({
+          (await listWatchlist(id)).map((w) => ({
             address: w.token_address,
             symbol: w.symbol,
           })),
-          langOf(ctx),
+          await langOf(ctx),
         ),
       });
       return;
@@ -526,7 +527,7 @@ export function createBot(token: string): Bot<BotContext> {
         ctx.session.sendDraft = undefined;
         await ctx.reply('Send the *token contract* to withdraw (`0x…`):', {
           parse_mode: 'Markdown',
-          reply_markup: cancelOnly('menu:send', langOf(ctx)),
+          reply_markup: cancelOnly('menu:send', await langOf(ctx)),
         });
         return;
       }
@@ -556,7 +557,7 @@ export function createBot(token: string): Bot<BotContext> {
         dir === 'in'
           ? `*Bridge In* · Base → Arc\nPick amount (USDC on *Base*):`
           : `*Bridge Out* · Arc → Base\nPick amount (USDC on *Arc*):`,
-        { parse_mode: 'Markdown', reply_markup: bridgeAmountMenu(dir, langOf(ctx)) },
+        { parse_mode: 'Markdown', reply_markup: bridgeAmountMenu(dir, await langOf(ctx)) },
       );
       return;
     }
@@ -569,7 +570,7 @@ export function createBot(token: string): Bot<BotContext> {
         dir === 'in'
           ? 'Send USDC amount to bridge *Base → Arc* (e.g. `25`):'
           : 'Send USDC amount to bridge *Arc → Base* (e.g. `25`):',
-        { parse_mode: 'Markdown', reply_markup: cancelOnly('menu:bridge', langOf(ctx)) },
+        { parse_mode: 'Markdown', reply_markup: cancelOnly('menu:bridge', await langOf(ctx)) },
       );
       return;
     }
@@ -602,7 +603,7 @@ export function createBot(token: string): Bot<BotContext> {
       ctx.session.expect = 'sell_token';
       await ctx.reply('Send the *token contract address* to sell:', {
         parse_mode: 'Markdown',
-        reply_markup: cancelOnly('menu:sell', langOf(ctx)),
+        reply_markup: cancelOnly('menu:sell', await langOf(ctx)),
       });
       return;
     }
@@ -647,15 +648,15 @@ export function createBot(token: string): Bot<BotContext> {
     if (data === 'ref:set_code') {
       ctx.session.expect = 'set_ref_code';
       await ctx.reply('Send a username (3–20 chars, letters/numbers/_).', {
-        reply_markup: cancelOnly('menu:referral', langOf(ctx)),
+        reply_markup: cancelOnly('menu:referral', await langOf(ctx)),
       });
       return;
     }
 
     if (data === 'menu:settings') {
-      const lang = userLang(id);
-      const slip = getSlippage(id);
-      await ctx.reply(settingsText(id), {
+      const lang = await userLang(id);
+      const slip = await getSlippage(id);
+      await ctx.reply(await settingsText(id), {
         parse_mode: 'Markdown',
         reply_markup: settingsMenu(slip, lang, { isAdmin: env.isAdmin(id) }),
       });
@@ -668,7 +669,7 @@ export function createBot(token: string): Bot<BotContext> {
     }
 
     if (data === 'settings:lang') {
-      const lang = userLang(id);
+      const lang = await userLang(id);
       await ctx.reply(t(lang, 'settings_pick_lang'), {
         reply_markup: languageMenu(lang),
       });
@@ -677,8 +678,8 @@ export function createBot(token: string): Bot<BotContext> {
 
     if (data.startsWith('lang:')) {
       const next = normalizeLang(data.slice('lang:'.length));
-      setLang(id, next);
-      const slip = getSlippage(id);
+      await setLang(id, next);
+      const slip = await getSlippage(id);
       await ctx.reply(t(next, 'lang_set', { label: LANG_LABELS[next] }), {
         parse_mode: 'Markdown',
         reply_markup: settingsMenu(slip, next, { isAdmin: env.isAdmin(id) }),
@@ -688,8 +689,8 @@ export function createBot(token: string): Bot<BotContext> {
 
     if (data.startsWith('slip:')) {
       const bps = Number(data.split(':')[1]);
-      setSlippage(id, bps);
-      const lang = userLang(id);
+      await setSlippage(id, bps);
+      const lang = await userLang(id);
       await ctx.reply(t(lang, 'slippage_set', { pct: (bps / 100).toFixed(1) }), {
         parse_mode: 'Markdown',
         reply_markup: settingsMenu(bps, lang, { isAdmin: env.isAdmin(id) }),
@@ -700,8 +701,8 @@ export function createBot(token: string): Bot<BotContext> {
     if (data === 'wallet:create') {
       const { privateKey, address } = createWallet();
       const enc = encryptPrivateKey(privateKey);
-      const n = listWallets(id).length + 1;
-      addWallet(id, `W${n}`, address, enc);
+      const n = (await listWallets(id)).length + 1;
+      await addWallet(id, `W${n}`, address, enc);
       const body = [
         `✅ *Wallet created* (Arc Mainnet)`,
         ``,
@@ -716,13 +717,13 @@ export function createBot(token: string): Bot<BotContext> {
         await ctx.editMessageText(body, {
           parse_mode: 'Markdown',
           link_preview_options: { is_disabled: true },
-          reply_markup: walletMenu(true, langOf(ctx)),
+          reply_markup: walletMenu(true, await langOf(ctx)),
         });
       } catch {
         await ctx.reply(body, {
           parse_mode: 'Markdown',
           link_preview_options: { is_disabled: true },
-          reply_markup: walletMenu(true, langOf(ctx)),
+          reply_markup: walletMenu(true, await langOf(ctx)),
         });
       }
       return;
@@ -732,20 +733,20 @@ export function createBot(token: string): Bot<BotContext> {
       ctx.session.expect = 'import_pk';
       await ctx.reply(
         'Send your *private key* (0x… or 64 hex). Message will be deleted when possible.',
-        { parse_mode: 'Markdown', reply_markup: cancelOnly('menu:wallet', langOf(ctx)) },
+        { parse_mode: 'Markdown', reply_markup: cancelOnly('menu:wallet', await langOf(ctx)) },
       );
       return;
     }
 
     if (data === 'wallet:copy') {
-      const w = getActiveWallet(id);
+      const w = await getActiveWallet(id);
       if (!w) return;
       await ctx.reply(`\`${w.address}\``, { parse_mode: 'Markdown' });
       return;
     }
 
     if (data === 'wallet:export') {
-      const w = getActiveWallet(id);
+      const w = await getActiveWallet(id);
       if (!w) return;
       try {
         const pk = decryptPrivateKey(w.enc_pk);
@@ -776,7 +777,7 @@ export function createBot(token: string): Bot<BotContext> {
       ctx.session.pendingToken = getAddress(token);
       await ctx.reply('Send USDC amount (e.g. `12.5`):', {
         parse_mode: 'Markdown',
-        reply_markup: cancelOnly(`back:buy:${getAddress(token)}`, langOf(ctx)),
+        reply_markup: cancelOnly(`back:buy:${getAddress(token)}`, await langOf(ctx)),
       });
       return;
     }
@@ -798,7 +799,7 @@ export function createBot(token: string): Bot<BotContext> {
         'Send *USD amount* to sell (e.g. `10` or `25.50`).\n_Approx. USDC value of tokens to sell._',
         {
           parse_mode: 'Markdown',
-          reply_markup: cancelOnly(`sell_pick:${getAddress(token)}`, langOf(ctx)),
+          reply_markup: cancelOnly(`sell_pick:${getAddress(token)}`, await langOf(ctx)),
         },
       );
       return;
@@ -852,21 +853,21 @@ export function createBot(token: string): Bot<BotContext> {
 
     if (ctx.session.expect === 'set_ref_code') {
       ctx.session.expect = null;
-      const result = setRefCode(id, text);
+      const result = await setRefCode(id, text);
       if (!result.ok) {
         ctx.session.expect = 'set_ref_code';
         await ctx.reply(`❌ ${result.error}\n\nTry another username:`, {
-          reply_markup: cancelOnly('menu:referral', langOf(ctx)),
+          reply_markup: cancelOnly('menu:referral', await langOf(ctx)),
         });
         return;
       }
-      const link = referralInviteLink(id);
+      const link = await referralInviteLink(id);
       await ctx.reply(
         `Set to *${result.code}*\n\`${link}\``,
         {
           parse_mode: 'Markdown',
           link_preview_options: { is_disabled: true },
-          reply_markup: referralMenu(link, langOf(ctx)),
+          reply_markup: referralMenu(link, await langOf(ctx)),
         },
       );
       return;
@@ -885,12 +886,12 @@ export function createBot(token: string): Bot<BotContext> {
         const { privateKeyToAccount } = await import('viem/accounts');
         const account = privateKeyToAccount(pk as Hex);
         const enc = encryptPrivateKey(pk as Hex);
-        const n = listWallets(id).length + 1;
-        addWallet(id, `W${n}`, account.address, enc);
+        const n = (await listWallets(id)).length + 1;
+        await addWallet(id, `W${n}`, account.address, enc);
         await ctx.deleteMessage().catch(() => {});
         await ctx.reply(`✅ Imported \`${account.address}\``, {
           parse_mode: 'Markdown',
-          reply_markup: walletMenu(true, langOf(ctx)),
+          reply_markup: walletMenu(true, await langOf(ctx)),
         });
       } catch {
         await ctx.reply('Import failed.');
@@ -950,15 +951,15 @@ export function createBot(token: string): Bot<BotContext> {
       } catch {
         /* */
       }
-      addToWatchlist(id, addr, symbol);
+      await addToWatchlist(id, addr, symbol);
       await ctx.reply(`⭐ Added *$${symbol}* to watchlist`, {
         parse_mode: 'Markdown',
         reply_markup: watchlistMenu(
-          listWatchlist(id).map((w) => ({
+          (await listWatchlist(id)).map((w) => ({
             address: w.token_address,
             symbol: w.symbol,
           })),
-          langOf(ctx),
+          await langOf(ctx),
         ),
       });
       return;
@@ -996,7 +997,7 @@ export function createBot(token: string): Bot<BotContext> {
         ].join('\n'),
         {
           parse_mode: 'Markdown',
-          reply_markup: cancelOnly('menu:send', langOf(ctx)),
+          reply_markup: cancelOnly('menu:send', await langOf(ctx)),
         },
       );
       return;
@@ -1025,7 +1026,7 @@ export function createBot(token: string): Bot<BotContext> {
         ].join('\n'),
         {
           parse_mode: 'Markdown',
-          reply_markup: confirmSend(langOf(ctx)),
+          reply_markup: confirmSend(await langOf(ctx)),
         },
       );
       return;
@@ -1059,8 +1060,8 @@ export function createBot(token: string): Bot<BotContext> {
 
 async function showWallet(ctx: BotContext, edit = false): Promise<void> {
   const id = ctx.from!.id;
-  const wallets = listWallets(id);
-  const active = getActiveWallet(id);
+  const wallets = await listWallets(id);
+  const active = await getActiveWallet(id);
   let bal = '—';
   if (active) {
     try {
@@ -1085,7 +1086,7 @@ async function showWallet(ctx: BotContext, edit = false): Promise<void> {
       : '',
   ].join('\n');
 
-  const markup = walletMenu(wallets.length > 0, userLang(id));
+  const markup = walletMenu(wallets.length > 0, await userLang(id));
   // Always send a fresh message so Create/Import buttons are visible
   // (editing "Quick actions" can fail silently on markup edge cases)
   if (edit && ctx.callbackQuery) {
@@ -1102,16 +1103,16 @@ async function showWallet(ctx: BotContext, edit = false): Promise<void> {
   await ctx.reply(lines, { parse_mode: 'Markdown', reply_markup: markup });
 }
 
-function referralInviteLink(tgId: number): string {
-  return `https://t.me/${env.botUsername()}?start=ref_${getInviteSlug(tgId)}`;
+async function referralInviteLink(tgId: number): Promise<string> {
+  return `https://t.me/${env.botUsername()}?start=ref_${await getInviteSlug(tgId)}`;
 }
 
 async function showPositions(ctx: BotContext, edit = false): Promise<void> {
   if (!(await requireArcLive(ctx))) return;
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
-    await ctx.reply(t(langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, langOf(ctx)) });
+    await ctx.reply(t(await langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, await langOf(ctx)) });
     return;
   }
 
@@ -1135,7 +1136,7 @@ async function showPositions(ctx: BotContext, edit = false): Promise<void> {
           symbol: p.symbol,
           label: `$${p.symbol.slice(0, 16)}`.slice(0, 64),
         })),
-      langOf(ctx),
+      await langOf(ctx),
     );
 
     if (edit && ctx.callbackQuery) {
@@ -1172,7 +1173,7 @@ async function showPositions(ctx: BotContext, edit = false): Promise<void> {
   } catch (e) {
     const err = e instanceof Error ? e.message : 'error';
     await ctx.reply(`Could not load positions: ${err}`, {
-      reply_markup: positionsMenu(undefined, langOf(ctx)),
+      reply_markup: positionsMenu(undefined, await langOf(ctx)),
     });
   }
 }
@@ -1183,9 +1184,9 @@ async function showPositionDetail(
   edit = false,
 ): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
-    await ctx.reply(t(langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, langOf(ctx)) });
+    await ctx.reply(t(await langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, await langOf(ctx)) });
     return;
   }
 
@@ -1229,7 +1230,7 @@ async function showPositionDetail(
     const body = enriched
       ? formatTokenDetail(enriched)
       : `*$${symbol}*\n\`${token}\`\n\nNo data.`;
-    const markup = positionDetailMenu(token, langOf(ctx));
+    const markup = positionDetailMenu(token, await langOf(ctx));
 
     if (edit && ctx.callbackQuery) {
       try {
@@ -1250,7 +1251,7 @@ async function showPositionDetail(
     });
   } catch (e) {
     await ctx.reply(`Could not load token: ${e instanceof Error ? e.message : 'error'}`, {
-      reply_markup: positionsMenu(undefined, langOf(ctx)),
+      reply_markup: positionsMenu(undefined, await langOf(ctx)),
     });
   }
 }
@@ -1262,7 +1263,7 @@ async function showAdmin(ctx: BotContext, edit = false): Promise<void> {
     return;
   }
 
-  const s = getCreatorFeeStats();
+  const s = await getCreatorFeeStats();
   const feePct = (env.platformFeeBps() / 100).toFixed(2);
   const refShare = (env.referralShareBps() / 100).toFixed(0);
   const treasury = env.feeTreasury();
@@ -1292,7 +1293,7 @@ async function showAdmin(ctx: BotContext, edit = false): Promise<void> {
     `_USDC lands on-chain in the treasury wallet. Bridge fees are not in this table yet._`,
   ].join('\n');
 
-  const markup = adminMenu(langOf(ctx));
+  const markup = adminMenu(await langOf(ctx));
   if (edit && ctx.callbackQuery) {
     try {
       await ctx.editMessageText(body, {
@@ -1318,9 +1319,9 @@ function buildReferralShareText(inviteLink: string): string {
 
 async function showReferral(ctx: BotContext, edit = false): Promise<void> {
   const id = ctx.from!.id;
-  const stats = getReferralStats(id);
-  const link = referralInviteLink(id);
-  const code = getRefCode(id);
+  const stats = await getReferralStats(id);
+  const link = await referralInviteLink(id);
+  const code = await getRefCode(id);
   const ex = referralEarningsExample(100, env.platformFeeBps(), env.referralShareBps());
 
   const lines: string[] = [
@@ -1336,7 +1337,7 @@ async function showReferral(ctx: BotContext, edit = false): Promise<void> {
   );
 
   const body = lines.join('\n');
-  const markup = referralMenu(link, langOf(ctx), buildReferralShareText(link));
+  const markup = referralMenu(link, await langOf(ctx), buildReferralShareText(link));
   if (edit && ctx.callbackQuery) {
     try {
       await ctx.editMessageText(body, {
@@ -1358,7 +1359,7 @@ async function showReferral(ctx: BotContext, edit = false): Promise<void> {
 
 async function showReferralHowItWorks(ctx: BotContext): Promise<void> {
   const ex = referralEarningsExample(100, env.platformFeeBps(), env.referralShareBps());
-  const link = referralInviteLink(ctx.from!.id);
+  const link = await referralInviteLink(ctx.from!.id);
   await ctx.reply(
     [
       `*How it works*`,
@@ -1370,7 +1371,7 @@ async function showReferralHowItWorks(ctx: BotContext): Promise<void> {
     ].join('\n'),
     {
       parse_mode: 'Markdown',
-      reply_markup: referralMenu(link, langOf(ctx), buildReferralShareText(link)),
+      reply_markup: referralMenu(link, await langOf(ctx), buildReferralShareText(link)),
     },
   );
 }
@@ -1378,9 +1379,9 @@ async function showReferralHowItWorks(ctx: BotContext): Promise<void> {
 async function showBridge(ctx: BotContext, edit = false): Promise<void> {
   if (!(await requireArcLive(ctx))) return;
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
-    await ctx.reply(t(langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, langOf(ctx)) });
+    await ctx.reply(t(await langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, await langOf(ctx)) });
     return;
   }
 
@@ -1442,7 +1443,7 @@ async function showBridge(ctx: BotContext, edit = false): Promise<void> {
     `_Mint on Arc is gas-sponsored when the sponsor is funded._`,
   ].join('\n');
 
-  const markup = bridgeMenu(langOf(ctx));
+  const markup = bridgeMenu(await langOf(ctx));
   if (edit && ctx.callbackQuery) {
     try {
       await ctx.editMessageText(body, {
@@ -1468,9 +1469,9 @@ async function previewBridge(
   dir: BridgeDirection,
 ): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
-    await ctx.reply(t(langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, langOf(ctx)) });
+    await ctx.reply(t(await langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, await langOf(ctx)) });
     return;
   }
   const feeExempt = env.isFeeExempt(w.address);
@@ -1488,7 +1489,7 @@ async function previewBridge(
     ].join('\n'),
     {
       parse_mode: 'Markdown',
-      reply_markup: confirmBridge(dir, amount, langOf(ctx)),
+      reply_markup: confirmBridge(dir, amount, await langOf(ctx)),
     },
   );
 }
@@ -1499,7 +1500,7 @@ async function executeBridge(
   dir: BridgeDirection,
 ): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
     await ctx.reply('No wallet.');
     return;
@@ -1545,7 +1546,7 @@ async function executeBridge(
       {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
-        reply_markup: mainMenu(true, langOf(ctx)),
+        reply_markup: mainMenu(true, await langOf(ctx)),
       },
     );
   } catch (e) {
@@ -1554,7 +1555,7 @@ async function executeBridge(
       {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
-        reply_markup: bridgeMenu(langOf(ctx)),
+        reply_markup: bridgeMenu(await langOf(ctx)),
       },
     );
   }
@@ -1565,7 +1566,7 @@ async function runBridgeClaim(
   dir: BridgeDirection,
 ): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
     await ctx.reply('No wallet.');
     return;
@@ -1590,7 +1591,7 @@ async function runBridgeClaim(
     if (!result) {
       await ctx.reply(`No claimable Gateway balance for *${dest}*.`, {
         parse_mode: 'Markdown',
-        reply_markup: bridgeMenu(langOf(ctx)),
+        reply_markup: bridgeMenu(await langOf(ctx)),
       });
       return;
     }
@@ -1599,12 +1600,12 @@ async function runBridgeClaim(
       {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
-        reply_markup: mainMenu(true, langOf(ctx)),
+        reply_markup: mainMenu(true, await langOf(ctx)),
       },
     );
   } catch (e) {
     await ctx.reply(`❌ Claim failed: ${e instanceof Error ? e.message : 'error'}`, {
-      reply_markup: bridgeMenu(langOf(ctx)),
+      reply_markup: bridgeMenu(await langOf(ctx)),
     });
   }
 }
@@ -1612,9 +1613,9 @@ async function runBridgeClaim(
 async function showSellPicker(ctx: BotContext, edit = false): Promise<void> {
   if (!(await requireArcLive(ctx))) return;
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
-    await ctx.reply(t(langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, langOf(ctx)) });
+    await ctx.reply(t(await langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, await langOf(ctx)) });
     return;
   }
 
@@ -1653,7 +1654,7 @@ async function showSellPicker(ctx: BotContext, edit = false): Promise<void> {
         symbol: h.symbol,
         formatted: h.formatted,
       })),
-      langOf(ctx),
+      await langOf(ctx),
     );
 
     if (edit && ctx.callbackQuery) {
@@ -1688,21 +1689,21 @@ async function showSellPicker(ctx: BotContext, edit = false): Promise<void> {
   } catch (e) {
     await ctx.reply(
       `Could not load holdings: ${e instanceof Error ? e.message : 'error'}`,
-      { reply_markup: cancelOnly('menu:back', langOf(ctx)) },
+      { reply_markup: cancelOnly('menu:back', await langOf(ctx)) },
     );
   }
 }
 
 async function openSell(ctx: BotContext, token: `0x${string}`): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
-    await ctx.reply(t(langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, langOf(ctx)) });
+    await ctx.reply(t(await langOf(ctx), 'create_wallet_first'), { reply_markup: walletMenu(false, await langOf(ctx)) });
     return;
   }
   if (token.toLowerCase() === env.usdc().toLowerCase()) {
     await ctx.reply('USDC is the quote asset — pick a token to sell for USDC.', {
-      reply_markup: cancelOnly('menu:sell', langOf(ctx)),
+      reply_markup: cancelOnly('menu:sell', await langOf(ctx)),
     });
     return;
   }
@@ -1726,7 +1727,7 @@ async function openSell(ctx: BotContext, token: `0x${string}`): Promise<void> {
   if (bal <= 0n) {
     await ctx.reply(`No *$${symbol}* balance in this wallet.`, {
       parse_mode: 'Markdown',
-      reply_markup: cancelOnly('menu:sell', langOf(ctx)),
+      reply_markup: cancelOnly('menu:sell', await langOf(ctx)),
     });
     return;
   }
@@ -1768,14 +1769,14 @@ async function openSell(ctx: BotContext, token: `0x${string}`): Promise<void> {
       ].join('\n'),
       {
         parse_mode: 'Markdown',
-        reply_markup: noPoolSellMenu(token, langOf(ctx)),
+        reply_markup: noPoolSellMenu(token, await langOf(ctx)),
         link_preview_options: { is_disabled: true },
       },
     );
     return;
   }
 
-  const pnl = getPositionPnl(id, token, bal, markUsdc);
+  const pnl = await getPositionPnl(id, token, bal, markUsdc);
   const feeExempt = env.isFeeExempt(w.address);
   const feePct = (env.platformFeeBps() / 100).toFixed(2);
   await ctx.reply(
@@ -1788,7 +1789,7 @@ async function openSell(ctx: BotContext, token: `0x${string}`): Promise<void> {
       ``,
       ...formatPnlLines(pnl),
       ``,
-      `Slippage: ${(getSlippage(id) / 100).toFixed(1)}%`,
+      `Slippage: ${(await getSlippage(id) / 100).toFixed(1)}%`,
       feeExempt
         ? `Bot fee: *waived*`
         : `Bot fee: *${feePct}%* of USDC proceeds`,
@@ -1797,7 +1798,7 @@ async function openSell(ctx: BotContext, token: `0x${string}`): Promise<void> {
     ].join('\n'),
     {
       parse_mode: 'Markdown',
-      reply_markup: sellPresets(token, langOf(ctx)),
+      reply_markup: sellPresets(token, await langOf(ctx)),
       link_preview_options: { is_disabled: true },
     },
   );
@@ -1852,7 +1853,7 @@ async function previewSell(
   size: SellSize,
 ): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
     await ctx.reply('No wallet.');
     return;
@@ -1888,13 +1889,13 @@ async function previewSell(
         ].join('\n'),
         {
           parse_mode: 'Markdown',
-          reply_markup: noPoolSellMenu(token, langOf(ctx)),
+          reply_markup: noPoolSellMenu(token, await langOf(ctx)),
         },
       );
       return;
     }
-    const refId = getReferrerTgId(id);
-    const refWallet = refId ? getActiveWallet(refId) : null;
+    const refId = await getReferrerTgId(id);
+    const refWallet = refId ? await getActiveWallet(refId) : null;
     const feeExempt = env.isFeeExempt(w.address);
     const fee = computePlatformFee(
       q.amountOut,
@@ -1905,7 +1906,7 @@ async function previewSell(
     const markSlice = Number(formatUsdc(q.amountOut));
     const frac = Math.min(1, Math.max(0, approxPct / 100));
     const fullMark = frac > 0 ? markSlice / frac : markSlice;
-    const fullPnl = getPositionPnl(id, token, bal, fullMark);
+    const fullPnl = await getPositionPnl(id, token, bal, fullMark);
     const sliceCost = fullPnl.hasBasis ? fullPnl.costUsdc * frac : 0;
     const slicePnl = fullPnl.hasBasis ? markSlice - sliceCost : null;
 
@@ -1926,7 +1927,7 @@ async function previewSell(
       size.kind === 'pct'
         ? { kind: 'pct', value: String(size.pct) }
         : { kind: 'usd', value: size.usdc.toFixed(2) },
-      langOf(ctx),
+      await langOf(ctx),
     );
 
     await ctx.reply(
@@ -1935,7 +1936,7 @@ async function previewSell(
         `Token: *$${symbol}*`,
         sizeLine,
         formatSellQuoteHuman(q, symbol, decimals),
-        `Slippage: ${(getSlippage(id) / 100).toFixed(1)}%`,
+        `Slippage: ${(await getSlippage(id) / 100).toFixed(1)}%`,
         ``,
         ...pnlLines,
         formatPlatformFeeLine(fee, 'sell'),
@@ -1956,7 +1957,7 @@ async function executeSell(
   size: SellSize,
 ): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
     await ctx.reply('No wallet.');
     return;
@@ -1973,9 +1974,9 @@ async function executeSell(
     if (amountIn <= 0n) throw new Error('Nothing to sell');
 
     const pk = decryptPrivateKey(w.enc_pk);
-    const slip = getSlippage(id);
-    const refId = getReferrerTgId(id);
-    const refWallet = refId ? getActiveWallet(refId) : null;
+    const slip = await getSlippage(id);
+    const refId = await getReferrerTgId(id);
+    const refWallet = refId ? await getActiveWallet(refId) : null;
     const referrerAddress = refWallet?.address
       ? (refWallet.address as `0x${string}`)
       : null;
@@ -1989,7 +1990,7 @@ async function executeSell(
       traderAddress: w.address as `0x${string}`,
     });
 
-    recordFeeEvent({
+    await recordFeeEvent({
       tgId: id,
       referrerTgId: referrerAddress && refId ? refId : null,
       tradeUsdc: formatUsdc(quote.amountOut),
@@ -2008,8 +2009,8 @@ async function executeSell(
     } catch {
       /* */
     }
-    rememberToken(id, token, symbol, decimals);
-    const realized = recordSellCost(
+    await rememberToken(id, token, symbol, decimals);
+    const realized = await recordSellCost(
       id,
       token,
       amountIn,
@@ -2017,7 +2018,7 @@ async function executeSell(
     );
     const tokenAmountHuman = formatUnits(amountIn, decimals);
     const proceedsN = Number(formatUsdc(usdcNet));
-    recordTrade({
+    await recordTrade({
       tgId: id,
       side: 'sell',
       tokenAddress: token,
@@ -2062,20 +2063,20 @@ async function executeSell(
       await ctx.replyWithPhoto(new InputFile(png, `pnl-${symbol}.png`), {
         caption,
         parse_mode: 'Markdown',
-        reply_markup: mainMenu(true, langOf(ctx)),
+        reply_markup: mainMenu(true, await langOf(ctx)),
       });
     } catch (imgErr) {
       console.warn('[pnl-card]', imgErr instanceof Error ? imgErr.message : imgErr);
       await ctx.reply(caption, {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
-        reply_markup: mainMenu(true, langOf(ctx)),
+        reply_markup: mainMenu(true, await langOf(ctx)),
       });
     }
   } catch (e) {
     await ctx.reply(
       `❌ Sell failed: ${e instanceof Error ? e.message : 'error'}\n\nCheck token balance + native gas on Arc Mainnet.`,
-      { reply_markup: mainMenu(true, langOf(ctx)) },
+      { reply_markup: mainMenu(true, await langOf(ctx)) },
     );
   }
 }
@@ -2083,10 +2084,10 @@ async function executeSell(
 async function openBuy(ctx: BotContext, token: `0x${string}`): Promise<void> {
   if (!(await requireArcLive(ctx))) return;
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
-    await ctx.reply(t(langOf(ctx), 'create_wallet_first'), {
-      reply_markup: walletMenu(false, langOf(ctx)),
+    await ctx.reply(t(await langOf(ctx), 'create_wallet_first'), {
+      reply_markup: walletMenu(false, await langOf(ctx)),
     });
     return;
   }
@@ -2095,7 +2096,7 @@ async function openBuy(ctx: BotContext, token: `0x${string}`): Promise<void> {
   const feePct = (env.platformFeeBps() / 100).toFixed(2);
   const feeLine = feeExempt
     ? `Bot fee: *waived*`
-    : `Bot fee: *${feePct}%*${getReferrerTgId(id) ? ' (includes referral share)' : ''}`;
+    : `Bot fee: *${feePct}%*${await getReferrerTgId(id) ? ' (includes referral share)' : ''}`;
 
   try {
     // No extra "loading" Telegram round-trip — one reply when ready
@@ -2105,10 +2106,10 @@ async function openBuy(ctx: BotContext, token: `0x${string}`): Promise<void> {
       tgId: id,
       feeExempt,
       sampleUsdc: env.buyPresets()[0] || '10',
-      slippageBps: getSlippage(id),
+      slippageBps: await getSlippage(id),
       feeLine,
     });
-    rememberToken(id, token, card.symbol, card.decimals);
+    await rememberToken(id, token, card.symbol, card.decimals);
 
     const text = [
       card.text,
@@ -2118,9 +2119,9 @@ async function openBuy(ctx: BotContext, token: `0x${string}`): Promise<void> {
     await ctx.reply(text, {
       parse_mode: 'Markdown',
       link_preview_options: { is_disabled: true },
-      reply_markup: buyPresets(token, langOf(ctx), {
+      reply_markup: buyPresets(token, await langOf(ctx), {
         hasBalance: card.hasBalance,
-        watching: isOnWatchlist(id, token),
+        watching: await isOnWatchlist(id, token),
       }),
     });
   } catch (e) {
@@ -2128,8 +2129,8 @@ async function openBuy(ctx: BotContext, token: `0x${string}`): Promise<void> {
       `Could not load token: ${e instanceof Error ? e.message : 'error'}\n\`${token}\``,
       {
         parse_mode: 'Markdown',
-        reply_markup: buyPresets(token, langOf(ctx), {
-          watching: isOnWatchlist(id, token),
+        reply_markup: buyPresets(token, await langOf(ctx), {
+          watching: await isOnWatchlist(id, token),
         }),
         link_preview_options: { is_disabled: true },
       },
@@ -2139,7 +2140,7 @@ async function openBuy(ctx: BotContext, token: `0x${string}`): Promise<void> {
 
 async function showWatchlist(ctx: BotContext, edit = false): Promise<void> {
   const id = ctx.from!.id;
-  const items = listWatchlist(id);
+  const items = await listWatchlist(id);
   const lines = [
     `*⭐ Watchlist*`,
     ``,
@@ -2153,7 +2154,7 @@ async function showWatchlist(ctx: BotContext, edit = false): Promise<void> {
   ].join('\n');
   const markup = watchlistMenu(
     items.map((w) => ({ address: w.token_address, symbol: w.symbol })),
-    langOf(ctx),
+    await langOf(ctx),
   );
   if (edit && ctx.callbackQuery) {
     try {
@@ -2176,10 +2177,10 @@ async function showWatchlist(ctx: BotContext, edit = false): Promise<void> {
 
 async function showSend(ctx: BotContext, edit = false): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
-    await ctx.reply(t(langOf(ctx), 'create_wallet_first'), {
-      reply_markup: walletMenu(false, langOf(ctx)),
+    await ctx.reply(t(await langOf(ctx), 'create_wallet_first'), {
+      reply_markup: walletMenu(false, await langOf(ctx)),
     });
     return;
   }
@@ -2217,7 +2218,7 @@ async function showSend(ctx: BotContext, edit = false): Promise<void> {
     `Pick an asset to send on *Arc Mainnet*.`,
     `_You need a little native Arc gas to submit the transfer._`,
   ].join('\n');
-  const markup = sendAssetMenu(tokens, langOf(ctx));
+  const markup = sendAssetMenu(tokens, await langOf(ctx));
 
   if (edit && ctx.callbackQuery) {
     try {
@@ -2235,10 +2236,10 @@ async function showSend(ctx: BotContext, edit = false): Promise<void> {
 
 async function beginSendTo(ctx: BotContext, token: `0x${string}`): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
-    await ctx.reply(t(langOf(ctx), 'create_wallet_first'), {
-      reply_markup: walletMenu(false, langOf(ctx)),
+    await ctx.reply(t(await langOf(ctx), 'create_wallet_first'), {
+      reply_markup: walletMenu(false, await langOf(ctx)),
     });
     return;
   }
@@ -2265,7 +2266,7 @@ async function beginSendTo(ctx: BotContext, token: `0x${string}`): Promise<void>
     ].join('\n'),
     {
       parse_mode: 'Markdown',
-      reply_markup: cancelOnly('menu:send', langOf(ctx)),
+      reply_markup: cancelOnly('menu:send', await langOf(ctx)),
     },
   );
 }
@@ -2273,10 +2274,10 @@ async function beginSendTo(ctx: BotContext, token: `0x${string}`): Promise<void>
 async function executeSend(ctx: BotContext): Promise<void> {
   const id = ctx.from!.id;
   const draft = ctx.session.sendDraft;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w || !draft?.token || !draft.to || !draft.amountHuman) {
     await ctx.reply('Nothing to send — start again with Send.', {
-      reply_markup: mainMenu(!!w, langOf(ctx)),
+      reply_markup: mainMenu(!!w, await langOf(ctx)),
     });
     return;
   }
@@ -2303,21 +2304,21 @@ async function executeSend(ctx: BotContext): Promise<void> {
       {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
-        reply_markup: mainMenu(true, langOf(ctx)),
+        reply_markup: mainMenu(true, await langOf(ctx)),
       },
     );
   } catch (e) {
     await ctx.reply(
       `❌ Send failed: ${e instanceof Error ? e.message : 'error'}`,
-      { reply_markup: mainMenu(true, langOf(ctx)) },
+      { reply_markup: mainMenu(true, await langOf(ctx)) },
     );
   }
 }
 
 async function showHistory(ctx: BotContext, edit = false): Promise<void> {
   const id = ctx.from!.id;
-  const lang = langOf(ctx);
-  const trades = listTrades(id, 20);
+  const lang = await langOf(ctx);
+  const trades = await listTrades(id, 20);
   const lines: string[] = [t(lang, 'history_title'), ``];
 
   if (trades.length === 0) {
@@ -2384,10 +2385,10 @@ async function previewBuy(
   }
 
   try {
-    const w = getActiveWallet(id);
+    const w = await getActiveWallet(id);
     const feeExempt = w ? env.isFeeExempt(w.address) : false;
-    const refId = getReferrerTgId(id);
-    const refWallet = refId ? getActiveWallet(refId) : null;
+    const refId = await getReferrerTgId(id);
+    const refWallet = refId ? await getActiveWallet(refId) : null;
     const gross = parseUnitsSafe(amount);
     const fee = computePlatformFee(
       gross,
@@ -2408,7 +2409,7 @@ async function previewBuy(
         ].join('\n'),
         {
           parse_mode: 'Markdown',
-          reply_markup: noPoolBuyMenu(langOf(ctx)),
+          reply_markup: noPoolBuyMenu(await langOf(ctx)),
         },
       );
       return;
@@ -2418,7 +2419,7 @@ async function previewBuy(
         `*Confirm buy*`,
         `Token: *$${symbol}*`,
         formatQuoteHuman(q, symbol, decimals),
-        `Slippage: ${(getSlippage(id) / 100).toFixed(1)}%`,
+        `Slippage: ${(await getSlippage(id) / 100).toFixed(1)}%`,
         ``,
         `You pay *$${amount} USDC* total`,
         formatPlatformFeeLine(fee, 'buy'),
@@ -2427,7 +2428,7 @@ async function previewBuy(
       ].join('\n'),
       {
         parse_mode: 'Markdown',
-        reply_markup: confirmBuy(token, amount, langOf(ctx)),
+        reply_markup: confirmBuy(token, amount, await langOf(ctx)),
       },
     );
   } catch (e) {
@@ -2441,7 +2442,7 @@ async function executeBuy(
   amount: string,
 ): Promise<void> {
   const id = ctx.from!.id;
-  const w = getActiveWallet(id);
+  const w = await getActiveWallet(id);
   if (!w) {
     await ctx.reply('No wallet.');
     return;
@@ -2451,9 +2452,9 @@ async function executeBuy(
 
   try {
     const pk = decryptPrivateKey(w.enc_pk);
-    const slip = getSlippage(id);
-    const refId = getReferrerTgId(id);
-    const refWallet = refId ? getActiveWallet(refId) : null;
+    const slip = await getSlippage(id);
+    const refId = await getReferrerTgId(id);
+    const refWallet = refId ? await getActiveWallet(refId) : null;
     const referrerAddress = refWallet?.address
       ? (refWallet.address as `0x${string}`)
       : null;
@@ -2467,7 +2468,7 @@ async function executeBuy(
       traderAddress: w.address as `0x${string}`,
     });
 
-    recordFeeEvent({
+    await recordFeeEvent({
       tgId: id,
       referrerTgId: referrerAddress && refId ? refId : null,
       tradeUsdc: amount,
@@ -2486,10 +2487,10 @@ async function executeBuy(
     } catch {
       /* */
     }
-    rememberToken(id, token, symbol, decimals);
+    await rememberToken(id, token, symbol, decimals);
     // Cost basis = USDC that actually swapped (after platform fee)
-    recordBuyCost(id, token, quote.amountOut, Number(formatUsdc(fee.swapIn)));
-    recordTrade({
+    await recordBuyCost(id, token, quote.amountOut, Number(formatUsdc(fee.swapIn)));
+    await recordTrade({
       tgId: id,
       side: 'buy',
       tokenAddress: token,
@@ -2510,13 +2511,13 @@ async function executeBuy(
       {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
-        reply_markup: mainMenu(true, langOf(ctx)),
+        reply_markup: mainMenu(true, await langOf(ctx)),
       },
     );
   } catch (e) {
     await ctx.reply(
       `❌ Trade failed: ${e instanceof Error ? e.message : 'error'}\n\nCheck USDC balance + native gas on Arc Mainnet.`,
-      { reply_markup: mainMenu(true, langOf(ctx)) },
+      { reply_markup: mainMenu(true, await langOf(ctx)) },
     );
   }
 }

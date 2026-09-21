@@ -6,7 +6,7 @@ import { formatUnits, hexToString, type Hex } from 'viem';
 import { publicClient } from '../chain/client.js';
 import { erc20Abi, erc20Bytes32MetaAbi, launchFactoryAbi } from '../chain/abis.js';
 import { env } from '../config/env.js';
-import { cacheGet, cacheSet } from './cache.js';
+import { cacheGet, cacheGetOrSet, cacheSet } from './cache.js';
 
 const RPC_MS = 6_000;
 const HTTP_MS = 5_000;

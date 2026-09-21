@@ -30,7 +30,7 @@ export function startBackupScheduler(): void {
     void runScheduledBackup('daily');
   }, intervalMs || DAY_MS);
 
-  console.log(
-    `[backup] scheduler on · every ${hours}h · disk only · wallets_now=${listAllWalletCount()}`,
-  );
+  void listAllWalletCount().then((n) => {
+    console.log(`[backup] scheduler on · every ${hours}h · postgres · wallets_now=${n}`);
+  });
 }

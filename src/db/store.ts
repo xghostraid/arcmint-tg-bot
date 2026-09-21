@@ -1,145 +1,43 @@
-import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureBotSchema, q, q1, qrun } from './pg.js';
 
 /**
  * WALLET PERSISTENCE — HARD RULE
- * ─────────────────────────────────────────────────────────────
- * NEVER delete user wallets. No DELETE FROM wallets. No DROP TABLE wallets.
- * No rm of bot.sqlite. No "reset DB" helpers. No UI to remove wallets.
- * Lost wallets = empty DATA_DIR / new volume, not intentional deletes.
- * Override with DATA_DIR only for a durable volume (Railway: /data).
+ * NEVER delete user wallets. Durable store is Neon Postgres (DATABASE_URL).
  */
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const dataDir = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(projectRoot, 'data');
 fs.mkdirSync(dataDir, { recursive: true });
-
 const backupDir = path.join(dataDir, 'wallet-backups');
 fs.mkdirSync(backupDir, { recursive: true });
+const dbPath = 'postgres:neon';
 
-const dbPath = path.join(dataDir, 'bot.sqlite');
-
-// On Railway (or any host with RAILWAY_ENVIRONMENT), DATA_DIR must point at the
-// mounted volume. Refusing ephemeral container FS prevents "wallets vanished" deploys.
-if (process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID) {
-  const required = process.env.DATA_DIR;
-  if (!required || path.resolve(required) !== path.resolve('/data')) {
-    throw new Error(
-      '[db] FATAL: On Railway, DATA_DIR must be /data (volume mount). ' +
-        `Got DATA_DIR=${required ?? '(unset)'}. Refusing to open a throwaway DB.`,
-    );
-  }
-}
-
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-/** Never wipe user data — log path once for ops. */
-console.log(`[db] sqlite ${dbPath}`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    tg_id INTEGER PRIMARY KEY,
-    created_at INTEGER NOT NULL,
-    slippage_bps INTEGER NOT NULL DEFAULT 100,
-    active_wallet INTEGER NOT NULL DEFAULT 0
-  );
-
-  CREATE TABLE IF NOT EXISTS wallets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tg_id INTEGER NOT NULL,
-    label TEXT NOT NULL,
-    address TEXT NOT NULL,
-    enc_pk TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS fee_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tg_id INTEGER NOT NULL,
-    referrer_tg_id INTEGER,
-    trade_usdc TEXT NOT NULL,
-    fee_total TEXT NOT NULL,
-    fee_treasury TEXT NOT NULL,
-    fee_referral TEXT NOT NULL,
-    swap_tx TEXT,
-    created_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS known_tokens (
-    address TEXT PRIMARY KEY,
-    symbol TEXT NOT NULL,
-    decimals INTEGER NOT NULL DEFAULT 18,
-    first_seen INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS user_tokens (
-    tg_id INTEGER NOT NULL,
-    token_address TEXT NOT NULL,
-    PRIMARY KEY (tg_id, token_address)
-  );
-
-  /** Average-cost inventory for unrealized PnL (bot-tracked trades only). */
-  CREATE TABLE IF NOT EXISTS cost_basis (
-    tg_id INTEGER NOT NULL,
-    token_address TEXT NOT NULL,
-    tokens_raw TEXT NOT NULL DEFAULT '0',
-    cost_usdc TEXT NOT NULL DEFAULT '0',
-    realized_usdc TEXT NOT NULL DEFAULT '0',
-    PRIMARY KEY (tg_id, token_address)
-  );
-
-  /** Immutable trade log (buys/sells) — never delete rows. */
-  CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tg_id INTEGER NOT NULL,
-    side TEXT NOT NULL,
-    token_address TEXT NOT NULL,
-    token_symbol TEXT NOT NULL,
-    token_amount TEXT NOT NULL,
-    usdc_amount TEXT NOT NULL,
-    fee_usdc TEXT NOT NULL DEFAULT '0',
-    realized_usdc TEXT,
-    tx_hash TEXT,
-    created_at INTEGER NOT NULL
-  );
-
-  /** User watchlist — pin tokens without holding. */
-  CREATE TABLE IF NOT EXISTS watchlist (
-    tg_id INTEGER NOT NULL,
-    token_address TEXT NOT NULL,
-    symbol TEXT NOT NULL DEFAULT 'TOKEN',
-    added_at INTEGER NOT NULL,
-    PRIMARY KEY (tg_id, token_address)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_wallets_tg ON wallets(tg_id);
-  CREATE INDEX IF NOT EXISTS idx_fee_events_tg ON fee_events(tg_id);
-  CREATE INDEX IF NOT EXISTS idx_fee_events_ref ON fee_events(referrer_tg_id);
-  CREATE INDEX IF NOT EXISTS idx_trades_tg ON trades(tg_id, created_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_watchlist_tg ON watchlist(tg_id);
-`);
-
-// Migrate older DBs
-const userCols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
-if (!userCols.some((c) => c.name === 'referrer_tg_id')) {
-  db.exec('ALTER TABLE users ADD COLUMN referrer_tg_id INTEGER');
-}
-if (!userCols.some((c) => c.name === 'ref_code')) {
-  db.exec('ALTER TABLE users ADD COLUMN ref_code TEXT');
-}
-if (!userCols.some((c) => c.name === 'lang')) {
-  db.exec("ALTER TABLE users ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'");
-}
-db.exec('CREATE INDEX IF NOT EXISTS idx_users_referrer ON users(referrer_tg_id)');
-db.exec(
-  'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_ref_code ON users(ref_code) WHERE ref_code IS NOT NULL',
-);
+const db = {
+  prepare(sql: string) {
+    const ignore = /INSERT OR IGNORE/i.test(sql);
+    const text = ignore
+      ? `${sql.replace(/INSERT OR IGNORE/i, 'INSERT')} ON CONFLICT DO NOTHING`
+      : sql;
+    return {
+      get: async (...params: unknown[]) => {
+        await ensureBotSchema();
+        return q1(text, params);
+      },
+      all: async (...params: unknown[]) => {
+        await ensureBotSchema();
+        return q(text, params);
+      },
+      run: async (...params: unknown[]) => {
+        await ensureBotSchema();
+        return qrun(text, params);
+      },
+    };
+  },
+};
 
 export type UserRow = {
   tg_id: number;
@@ -172,47 +70,47 @@ export type FeeEventRow = {
   created_at: number;
 };
 
-export function ensureUser(tgId: number): UserRow {
-  const existing = db.prepare('SELECT * FROM users WHERE tg_id = ?').get(tgId) as
+export async function ensureUser(tgId: number): Promise<UserRow> {
+  const existing = await db.prepare('SELECT * FROM users WHERE tg_id = ?').get(tgId) as
     | UserRow
     | undefined;
   if (existing) return existing;
   const now = Math.floor(Date.now() / 1000);
-  db.prepare(
+  await db.prepare(
     'INSERT INTO users (tg_id, created_at, slippage_bps, active_wallet, referrer_tg_id) VALUES (?, ?, 100, 0, NULL)',
   ).run(tgId, now);
-  return db.prepare('SELECT * FROM users WHERE tg_id = ?').get(tgId) as UserRow;
+  return await db.prepare('SELECT * FROM users WHERE tg_id = ?').get(tgId) as UserRow;
 }
 
 /**
  * Bind referrer once. Ignores self-ref, missing users, and users who already have a referrer.
  */
-export function trySetReferrer(tgId: number, referrerTgId: number): boolean {
+export async function trySetReferrer(tgId: number, referrerTgId: number): Promise<boolean> {
   if (!Number.isFinite(referrerTgId) || referrerTgId <= 0) return false;
   if (referrerTgId === tgId) return false;
-  ensureUser(tgId);
-  ensureUser(referrerTgId);
-  const user = ensureUser(tgId);
+  await ensureUser(tgId);
+  await ensureUser(referrerTgId);
+  const user = await ensureUser(tgId);
   if (user.referrer_tg_id) return false;
-  db.prepare('UPDATE users SET referrer_tg_id = ? WHERE tg_id = ? AND referrer_tg_id IS NULL').run(
+  await db.prepare('UPDATE users SET referrer_tg_id = ? WHERE tg_id = ? AND referrer_tg_id IS NULL').run(
     referrerTgId,
     tgId,
   );
-  return ensureUser(tgId).referrer_tg_id === referrerTgId;
+  return (await ensureUser(tgId)).referrer_tg_id === referrerTgId;
 }
 
-export function getReferrerTgId(tgId: number): number | null {
-  const u = ensureUser(tgId);
+export async function getReferrerTgId(tgId: number): Promise<number | null> {
+  const u = await ensureUser(tgId);
   return u.referrer_tg_id ?? null;
 }
 
-export function getRefCode(tgId: number): string | null {
-  return ensureUser(tgId).ref_code ?? null;
+export async function getRefCode(tgId: number): Promise<string | null> {
+  return (await ensureUser(tgId)).ref_code ?? null;
 }
 
 /** Invite slug for links: custom username, else tg id. */
-export function getInviteSlug(tgId: number): string {
-  const code = getRefCode(tgId);
+export async function getInviteSlug(tgId: number): Promise<string> {
+  const code = await getRefCode(tgId);
   return code || String(tgId);
 }
 
@@ -237,11 +135,11 @@ const RESERVED_REF_CODES = new Set([
  * Validate + set unique referral username.
  * Rules: 3–20 chars, start with a letter, a–z 0–9 _, case-insensitive unique.
  */
-export function setRefCode(
+export async function setRefCode(
   tgId: number,
   raw: string,
-): { ok: true; code: string } | { ok: false; error: string } {
-  ensureUser(tgId);
+): Promise<{ ok: true; code: string } | { ok: false; error: string }> {
+  await ensureUser(tgId);
   const code = raw.trim().toLowerCase().replace(/^@/, '');
   if (!/^[a-z][a-z0-9_]{2,19}$/.test(code)) {
     return {
@@ -255,8 +153,7 @@ export function setRefCode(
   }
   // Pure digit-like codes that could collide with tg ids are blocked by letter-start rule.
 
-  const taken = db
-    .prepare(
+  const taken = await db.prepare(
       'SELECT tg_id FROM users WHERE lower(ref_code) = ? AND tg_id != ? LIMIT 1',
     )
     .get(code, tgId) as { tg_id: number } | undefined;
@@ -265,7 +162,7 @@ export function setRefCode(
   }
 
   try {
-    db.prepare('UPDATE users SET ref_code = ? WHERE tg_id = ?').run(code, tgId);
+    await db.prepare('UPDATE users SET ref_code = ? WHERE tg_id = ?').run(code, tgId);
   } catch {
     return { ok: false, error: 'That username is already taken.' };
   }
@@ -273,7 +170,7 @@ export function setRefCode(
 }
 
 /** Resolve /start payload (ref_alice, ref_123, alice) → referrer tg id. */
-export function resolveReferrerFromPayload(payload: string): number | null {
+export async function resolveReferrerFromPayload(payload: string): Promise<number | null> {
   let p = payload.trim();
   if (!p) return null;
   p = p.replace(/^(ref[_-]?)/i, '');
@@ -283,7 +180,7 @@ export function resolveReferrerFromPayload(payload: string): number | null {
   if (/^\d+$/.test(p)) {
     const id = Number(p);
     if (!Number.isFinite(id) || id <= 0) return null;
-    const exists = db.prepare('SELECT tg_id FROM users WHERE tg_id = ?').get(id) as
+    const exists = await db.prepare('SELECT tg_id FROM users WHERE tg_id = ?').get(id) as
       | { tg_id: number }
       | undefined;
     // Still allow binding to id even if they never opened the bot — ensureUser on set
@@ -291,21 +188,19 @@ export function resolveReferrerFromPayload(payload: string): number | null {
   }
 
   const code = p.toLowerCase();
-  const row = db
-    .prepare('SELECT tg_id FROM users WHERE lower(ref_code) = ? LIMIT 1')
+  const row = await db.prepare('SELECT tg_id FROM users WHERE lower(ref_code) = ? LIMIT 1')
     .get(code) as { tg_id: number } | undefined;
   return row?.tg_id ?? null;
 }
 
-export function listWallets(tgId: number): WalletRow[] {
-  return db
-    .prepare('SELECT * FROM wallets WHERE tg_id = ? ORDER BY id ASC')
+export async function listWallets(tgId: number): Promise<WalletRow[]> {
+  return await db.prepare('SELECT * FROM wallets WHERE tg_id = ? ORDER BY id ASC')
     .all(tgId) as WalletRow[];
 }
 
 /** Total wallets stored (for startup health log — never wipe this table). */
-export function listAllWalletCount(): number {
-  const row = db.prepare('SELECT COUNT(*) AS c FROM wallets').get() as { c: number };
+export async function listAllWalletCount(): Promise<number> {
+  const row = await db.prepare('SELECT COUNT(*) AS c FROM wallets').get() as { c: number };
   return row.c;
 }
 
@@ -329,10 +224,11 @@ export async function backupFullDatabase(reason: string): Promise<{
 }> {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const safeReason = reason.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
-  const outPath = path.join(backupDir, `bot-${stamp}-${safeReason}.sqlite`);
-  await db.backup(outPath);
-  const size = fs.statSync(outPath).size;
-  const walletCount = listAllWalletCount();
+  const outPath = path.join(backupDir, `bot-${stamp}-${safeReason}.json`);
+  const walletCount = await listAllWalletCount();
+  const payload = JSON.stringify({ reason, at: new Date().toISOString(), walletCount });
+  fs.writeFileSync(outPath, payload, { mode: 0o600 });
+  const size = Buffer.byteLength(payload);
 
   // Keep last 14 full DB dumps (never touch bot.sqlite itself)
   const files = fs
@@ -360,22 +256,21 @@ export type WatchlistRow = {
   added_at: number;
 };
 
-export function addToWatchlist(tgId: number, tokenAddress: string, symbol: string): boolean {
-  ensureUser(tgId);
+export async function addToWatchlist(tgId: number, tokenAddress: string, symbol: string): Promise<boolean> {
+  await ensureUser(tgId);
   const addr = tokenAddress.toLowerCase();
   const now = Math.floor(Date.now() / 1000);
-  const info = db
-    .prepare(
+  const info = await db.prepare(
       `INSERT OR IGNORE INTO watchlist (tg_id, token_address, symbol, added_at)
        VALUES (?, ?, ?, ?)`,
     )
     .run(tgId, addr, symbol.slice(0, 32), now);
   if (info.changes > 0) {
-    rememberToken(tgId, addr, symbol, 18);
+    await rememberToken(tgId, addr, symbol, 18);
     return true;
   }
   // Update symbol if already watched
-  db.prepare(`UPDATE watchlist SET symbol = ? WHERE tg_id = ? AND token_address = ?`).run(
+  await db.prepare(`UPDATE watchlist SET symbol = ? WHERE tg_id = ? AND token_address = ?`).run(
     symbol.slice(0, 32),
     tgId,
     addr,
@@ -383,23 +278,20 @@ export function addToWatchlist(tgId: number, tokenAddress: string, symbol: strin
   return false;
 }
 
-export function removeFromWatchlist(tgId: number, tokenAddress: string): boolean {
-  const info = db
-    .prepare(`DELETE FROM watchlist WHERE tg_id = ? AND token_address = ?`)
+export async function removeFromWatchlist(tgId: number, tokenAddress: string): Promise<boolean> {
+  const info = await db.prepare(`DELETE FROM watchlist WHERE tg_id = ? AND token_address = ?`)
     .run(tgId, tokenAddress.toLowerCase());
   return info.changes > 0;
 }
 
-export function isOnWatchlist(tgId: number, tokenAddress: string): boolean {
-  const row = db
-    .prepare(`SELECT 1 AS o FROM watchlist WHERE tg_id = ? AND token_address = ?`)
+export async function isOnWatchlist(tgId: number, tokenAddress: string): Promise<boolean> {
+  const row = await db.prepare(`SELECT 1 AS o FROM watchlist WHERE tg_id = ? AND token_address = ?`)
     .get(tgId, tokenAddress.toLowerCase()) as { o: number } | undefined;
   return Boolean(row);
 }
 
-export function listWatchlist(tgId: number): WatchlistRow[] {
-  return db
-    .prepare(
+export async function listWatchlist(tgId: number): Promise<WatchlistRow[]> {
+  return await db.prepare(
       `SELECT tg_id, token_address, symbol, added_at FROM watchlist
        WHERE tg_id = ? ORDER BY added_at DESC LIMIT 40`,
     )
@@ -416,9 +308,9 @@ export function listWatchlist(tgId: number): WatchlistRow[] {
  */
 
 /** Snapshot all wallets (still encrypted) after every create/import. */
-function backupWalletsSnapshot(reason: string): void {
+async function backupWalletsSnapshot(reason: string): Promise<void> {
   try {
-    const rows = db.prepare('SELECT * FROM wallets ORDER BY id ASC').all() as WalletRow[];
+    const rows = await db.prepare('SELECT * FROM wallets ORDER BY id ASC').all() as WalletRow[];
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const file = path.join(backupDir, `wallets-${stamp}-${reason}.json`);
     fs.writeFileSync(
@@ -450,65 +342,64 @@ function backupWalletsSnapshot(reason: string): void {
   }
 }
 
-export function addWallet(
+export async function addWallet(
   tgId: number,
   label: string,
   address: string,
   encPk: string,
-): WalletRow {
-  ensureUser(tgId);
+): Promise<WalletRow> {
+  await ensureUser(tgId);
   const now = Math.floor(Date.now() / 1000);
-  const info = db
-    .prepare(
+  const info = await db.prepare(
       'INSERT INTO wallets (tg_id, label, address, enc_pk, created_at) VALUES (?, ?, ?, ?, ?)',
     )
     .run(tgId, label, address, encPk, now);
   const id = Number(info.lastInsertRowid);
-  const wallets = listWallets(tgId);
+  const wallets = await listWallets(tgId);
   if (wallets.length === 1) {
-    db.prepare('UPDATE users SET active_wallet = ? WHERE tg_id = ?').run(id, tgId);
+    await db.prepare('UPDATE users SET active_wallet = ? WHERE tg_id = ?').run(id, tgId);
   }
-  backupWalletsSnapshot(`add-${tgId}-${id}`);
-  return db.prepare('SELECT * FROM wallets WHERE id = ?').get(id) as WalletRow;
+  await backupWalletsSnapshot(`add-${tgId}-${id}`);
+  return await db.prepare('SELECT * FROM wallets WHERE id = ?').get(id) as WalletRow;
 }
 
-export function getActiveWallet(tgId: number): WalletRow | null {
-  const user = ensureUser(tgId);
+export async function getActiveWallet(tgId: number): Promise<WalletRow | null> {
+  const user = await ensureUser(tgId);
   if (!user.active_wallet) {
-    const wallets = listWallets(tgId);
+    const wallets = await listWallets(tgId);
     return wallets[0] ?? null;
   }
   return (
-    (db.prepare('SELECT * FROM wallets WHERE id = ? AND tg_id = ?').get(
+    (await db.prepare('SELECT * FROM wallets WHERE id = ? AND tg_id = ?').get(
       user.active_wallet,
       tgId,
     ) as WalletRow | undefined) ?? null
   );
 }
 
-export function setActiveWallet(tgId: number, walletId: number): void {
-  db.prepare('UPDATE users SET active_wallet = ? WHERE tg_id = ?').run(walletId, tgId);
+export async function setActiveWallet(tgId: number, walletId: number): Promise<void> {
+  await db.prepare('UPDATE users SET active_wallet = ? WHERE tg_id = ?').run(walletId, tgId);
 }
 
-export function setSlippage(tgId: number, bps: number): void {
-  ensureUser(tgId);
-  db.prepare('UPDATE users SET slippage_bps = ? WHERE tg_id = ?').run(bps, tgId);
+export async function setSlippage(tgId: number, bps: number): Promise<void> {
+  await ensureUser(tgId);
+  await db.prepare('UPDATE users SET slippage_bps = ? WHERE tg_id = ?').run(bps, tgId);
 }
 
-export function getSlippage(tgId: number): number {
-  return ensureUser(tgId).slippage_bps;
+export async function getSlippage(tgId: number): Promise<number> {
+  return (await ensureUser(tgId)).slippage_bps;
 }
 
-export function getLang(tgId: number): string {
-  return ensureUser(tgId).lang || 'en';
+export async function getLang(tgId: number): Promise<string> {
+  return (await ensureUser(tgId)).lang || 'en';
 }
 
-export function setLang(tgId: number, lang: string): void {
-  ensureUser(tgId);
-  db.prepare('UPDATE users SET lang = ? WHERE tg_id = ?').run(lang, tgId);
+export async function setLang(tgId: number, lang: string): Promise<void> {
+  await ensureUser(tgId);
+  await db.prepare('UPDATE users SET lang = ? WHERE tg_id = ?').run(lang, tgId);
 }
 
-export function recordFeeEvent(opts: {
+export async function recordFeeEvent(opts: {
   tgId: number;
   referrerTgId: number | null;
   tradeUsdc: string;
@@ -516,9 +407,9 @@ export function recordFeeEvent(opts: {
   feeTreasury: string;
   feeReferral: string;
   swapTx: string | null;
-}): void {
+}): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
-  db.prepare(
+  await db.prepare(
     `INSERT INTO fee_events
       (tg_id, referrer_tg_id, trade_usdc, fee_total, fee_treasury, fee_referral, swap_tx, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -551,7 +442,7 @@ export type TradeRow = {
 };
 
 /** Append-only trade history (never deleted). */
-export function recordTrade(opts: {
+export async function recordTrade(opts: {
   tgId: number;
   side: TradeSide;
   tokenAddress: string;
@@ -561,9 +452,9 @@ export function recordTrade(opts: {
   feeUsdc?: string;
   realizedUsdc?: number | null;
   txHash?: string | null;
-}): void {
+}): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
-  db.prepare(
+  await db.prepare(
     `INSERT INTO trades
       (tg_id, side, token_address, token_symbol, token_amount, usdc_amount, fee_usdc, realized_usdc, tx_hash, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -583,9 +474,8 @@ export function recordTrade(opts: {
   );
 }
 
-export function listTrades(tgId: number, limit = 20): TradeRow[] {
-  return db
-    .prepare(
+export async function listTrades(tgId: number, limit = 20): Promise<TradeRow[]> {
+  return await db.prepare(
       `SELECT * FROM trades WHERE tg_id = ? ORDER BY id DESC LIMIT ?`,
     )
     .all(tgId, limit) as TradeRow[];
@@ -604,23 +494,23 @@ function isPlaceholderSymbol(symbol: string): boolean {
   return !s || s === 'TOKEN' || s === '???' || s === 'UNKNOWN';
 }
 
-export function rememberToken(
+export async function rememberToken(
   tgId: number,
   address: string,
   symbol: string,
   decimals: number,
-): void {
+): Promise<void> {
   const addr = address.toLowerCase();
   const now = Math.floor(Date.now() / 1000);
   const safe = isPlaceholderSymbol(symbol) ? '' : symbol.slice(0, 32);
   if (!safe) {
-    db.prepare(`INSERT OR IGNORE INTO user_tokens (tg_id, token_address) VALUES (?, ?)`).run(
+    await db.prepare(`INSERT OR IGNORE INTO user_tokens (tg_id, token_address) VALUES (?, ?)`).run(
       tgId,
       addr,
     );
     return;
   }
-  db.prepare(
+  await db.prepare(
     `INSERT INTO known_tokens (address, symbol, decimals, first_seen)
      VALUES (?, ?, ?, ?)
      ON CONFLICT(address) DO UPDATE SET
@@ -630,16 +520,15 @@ export function rememberToken(
        END,
        decimals = excluded.decimals`,
   ).run(addr, safe, decimals, now);
-  db.prepare(
+  await db.prepare(
     `INSERT OR IGNORE INTO user_tokens (tg_id, token_address) VALUES (?, ?)`,
   ).run(tgId, addr);
 }
 
-export function listKnownTokensForUser(
+export async function listKnownTokensForUser(
   tgId: number,
-): { address: string; symbol: string; decimals: number }[] {
-  return db
-    .prepare(
+): Promise<{ address: string; symbol: string; decimals: number }[]> {
+  return (await db.prepare(
       `SELECT k.address, k.symbol, k.decimals
        FROM user_tokens u
        JOIN known_tokens k ON k.address = u.token_address
@@ -647,7 +536,7 @@ export function listKnownTokensForUser(
        ORDER BY k.first_seen DESC
        LIMIT 100`,
     )
-    .all(tgId) as { address: string; symbol: string; decimals: number }[];
+    .all(tgId)) as { address: string; symbol: string; decimals: number }[];
 }
 
 type CostRow = {
@@ -656,15 +545,14 @@ type CostRow = {
   realized_usdc: string;
 };
 
-function getCostRow(tgId: number, token: string): CostRow {
+async function getCostRow(tgId: number, token: string): Promise<CostRow> {
   const addr = token.toLowerCase();
-  const row = db
-    .prepare(
+  const row = await db.prepare(
       'SELECT tokens_raw, cost_usdc, realized_usdc FROM cost_basis WHERE tg_id = ? AND token_address = ?',
     )
     .get(tgId, addr) as CostRow | undefined;
   if (row) return row;
-  db.prepare(
+  await db.prepare(
     `INSERT INTO cost_basis (tg_id, token_address, tokens_raw, cost_usdc, realized_usdc)
      VALUES (?, ?, '0', '0', '0')`,
   ).run(tgId, addr);
@@ -672,15 +560,15 @@ function getCostRow(tgId: number, token: string): CostRow {
 }
 
 /** Record a buy into average-cost inventory (token raw amount + USDC spent). */
-export function recordBuyCost(
+export async function recordBuyCost(
   tgId: number,
   token: string,
   tokenAmountRaw: bigint,
   usdcSpent: number,
-): void {
+): Promise<void> {
   if (tokenAmountRaw <= 0n || !(usdcSpent > 0)) return;
   const addr = token.toLowerCase();
-  const row = getCostRow(tgId, addr);
+  const row = await getCostRow(tgId, addr);
   let tokens = 0n;
   try {
     tokens = BigInt(row.tokens_raw || '0');
@@ -690,7 +578,7 @@ export function recordBuyCost(
   const cost = Number(row.cost_usdc) || 0;
   const nextTokens = tokens + tokenAmountRaw;
   const nextCost = cost + usdcSpent;
-  db.prepare(
+  await db.prepare(
     `UPDATE cost_basis SET tokens_raw = ?, cost_usdc = ? WHERE tg_id = ? AND token_address = ?`,
   ).run(nextTokens.toString(), String(nextCost), tgId, addr);
 }
@@ -708,15 +596,15 @@ function mulDivCost(costUsd: number, num: bigint, den: bigint): number {
 }
 
 /** Record a sell: reduce inventory, accrue realized PnL. */
-export function recordSellCost(
+export async function recordSellCost(
   tgId: number,
   token: string,
   tokenAmountRaw: bigint,
   usdcReceived: number,
-): number {
+): Promise<number> {
   if (tokenAmountRaw <= 0n) return 0;
   const addr = token.toLowerCase();
-  const row = getCostRow(tgId, addr);
+  const row = await getCostRow(tgId, addr);
   let tokens = 0n;
   try {
     tokens = BigInt(row.tokens_raw || '0');
@@ -728,7 +616,7 @@ export function recordSellCost(
 
   if (tokens <= 0n || cost <= 0) {
     // No basis — treat full proceeds as realized (unknown cost)
-    db.prepare(
+    await db.prepare(
       `UPDATE cost_basis SET realized_usdc = ? WHERE tg_id = ? AND token_address = ?`,
     ).run(String(realized + usdcReceived), tgId, addr);
     return usdcReceived;
@@ -740,7 +628,7 @@ export function recordSellCost(
   const nextTokens = tokens - sold;
   const nextCost = Math.max(0, cost - costOfSold);
 
-  db.prepare(
+  await db.prepare(
     `UPDATE cost_basis SET tokens_raw = ?, cost_usdc = ?, realized_usdc = ?
      WHERE tg_id = ? AND token_address = ?`,
   ).run(
@@ -771,14 +659,13 @@ export type PositionPnl = {
  * Unrealized PnL for current token balance using average cost from bot trades.
  * markUsdc = current full-balance quote in USDC.
  */
-export function getPositionPnl(
+export async function getPositionPnl(
   tgId: number,
   token: string,
   balanceRaw: bigint,
   markUsdc: number,
-): PositionPnl {
-  const row = db
-    .prepare(
+): Promise<PositionPnl> {
+  const row = await db.prepare(
       'SELECT tokens_raw, cost_usdc, realized_usdc FROM cost_basis WHERE tg_id = ? AND token_address = ?',
     )
     .get(tgId, token.toLowerCase()) as CostRow | undefined;
@@ -858,15 +745,14 @@ export function formatPnlLines(pnl: PositionPnl): string[] {
   ];
 }
 
-export function getReferralStats(tgId: number): ReferralStats {
+export async function getReferralStats(tgId: number): Promise<ReferralStats> {
   const inviteCount = (
-    db.prepare('SELECT COUNT(*) AS c FROM users WHERE referrer_tg_id = ?').get(tgId) as {
+    await db.prepare('SELECT COUNT(*) AS c FROM users WHERE referrer_tg_id = ?').get(tgId) as {
       c: number;
     }
   ).c;
 
-  const row = db
-    .prepare(
+  const row = await db.prepare(
       `SELECT
          COUNT(*) AS trade_count,
          COALESCE(SUM(CAST(trade_usdc AS REAL)), 0) AS volume,
@@ -893,9 +779,8 @@ export type ReferralPayoutRow = {
 };
 
 /** Latest referral fee payouts (USDC already sent to referrer on-chain). */
-export function listRecentReferralPayouts(tgId: number, limit = 8): ReferralPayoutRow[] {
-  return db
-    .prepare(
+export async function listRecentReferralPayouts(tgId: number, limit = 8): Promise<ReferralPayoutRow[]> {
+  return await db.prepare(
       `SELECT tg_id, trade_usdc, fee_referral, created_at, swap_tx
        FROM fee_events
        WHERE referrer_tg_id = ? AND CAST(fee_referral AS REAL) > 0
@@ -906,18 +791,17 @@ export function listRecentReferralPayouts(tgId: number, limit = 8): ReferralPayo
 }
 
 /** Users who joined via this referrer (most recent first). */
-export function listRecentInvitees(
+export async function listRecentInvitees(
   tgId: number,
   limit = 6,
-): { tg_id: number; created_at: number; ref_code: string | null }[] {
-  return db
-    .prepare(
+): Promise<{ tg_id: number; created_at: number; ref_code: string | null }[]> {
+  return (await db.prepare(
       `SELECT tg_id, created_at, ref_code FROM users
        WHERE referrer_tg_id = ?
        ORDER BY created_at DESC
        LIMIT ?`,
     )
-    .all(tgId, limit) as { tg_id: number; created_at: number; ref_code: string | null }[];
+    .all(tgId, limit)) as { tg_id: number; created_at: number; ref_code: string | null }[];
 }
 
 /** Example: $100 trade → platform fee → your cut (for growth UI). */
@@ -958,9 +842,8 @@ export type CreatorFeeStats = {
   lastTradeAt: number | null;
 };
 
-export function getCreatorFeeStats(): CreatorFeeStats {
-  const agg = db
-    .prepare(
+export async function getCreatorFeeStats(): Promise<CreatorFeeStats> {
+  const agg = await db.prepare(
       `SELECT
          COUNT(*) AS trade_count,
          COUNT(DISTINCT tg_id) AS unique_traders,
@@ -982,10 +865,10 @@ export function getCreatorFeeStats(): CreatorFeeStats {
   };
 
   const usersCount = (
-    db.prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number }
+    await db.prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number }
   ).c;
   const walletsCount = (
-    db.prepare('SELECT COUNT(*) AS c FROM wallets').get() as { c: number }
+    await db.prepare('SELECT COUNT(*) AS c FROM wallets').get() as { c: number }
   ).c;
 
   return {
@@ -1002,9 +885,8 @@ export function getCreatorFeeStats(): CreatorFeeStats {
 }
 
 /** Lifetime realized PnL from bot sells (cost_basis). */
-export function getLifetimeRealizedUsdc(tgId: number): number {
-  const row = db
-    .prepare(
+export async function getLifetimeRealizedUsdc(tgId: number): Promise<number> {
+  const row = await db.prepare(
       `SELECT COALESCE(SUM(CAST(realized_usdc AS REAL)), 0) AS r
        FROM cost_basis WHERE tg_id = ?`,
     )
