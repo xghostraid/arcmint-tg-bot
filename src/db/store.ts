@@ -8,9 +8,11 @@ import { ensureBotSchema, q, q1, qrun } from './pg.js';
  * NEVER delete user wallets. Durable store is Neon Postgres (DATABASE_URL).
  */
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const dataDir = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : path.join(projectRoot, 'data');
+const dataDir = process.env.VERCEL
+  ? '/tmp/arctrade-data'
+  : process.env.DATA_DIR
+    ? path.resolve(process.env.DATA_DIR)
+    : path.join(projectRoot, 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 const backupDir = path.join(dataDir, 'wallet-backups');
 fs.mkdirSync(backupDir, { recursive: true });

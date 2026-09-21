@@ -17,9 +17,6 @@ export function getPool(): pg.Pool {
       connectionTimeoutMillis: 8_000,
       ssl: url.includes('localhost') ? undefined : { rejectUnauthorized: false },
     });
-    pool.on('connect', (client) => {
-      client.query('SET search_path TO tgbot, public').catch(() => {});
-    });
     pool.on('error', (err) => {
       console.error('[pg] pool error', err.message);
     });
@@ -34,6 +31,26 @@ function toPg(sql: string): string {
     .replace(/\?/g, () => `$${++n}`);
 }
 
+async function withBotSchema<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET LOCAL search_path TO tgbot, public');
+    const out = await fn(client);
+    await client.query('COMMIT');
+    return out;
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* */
+    }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 export async function q<T = Record<string, unknown>>(
   sql: string,
   params: unknown[] = [],
@@ -41,8 +58,10 @@ export async function q<T = Record<string, unknown>>(
   const text = toPg(sql);
   const returning =
     /^\s*INSERT\s/i.test(sql) && !/RETURNING/i.test(sql) ? `${text} RETURNING *` : text;
-  const res = await getPool().query(returning, params);
-  return res.rows.map(numify) as T[];
+  return withBotSchema(async (client) => {
+    const res = await client.query(returning, params);
+    return res.rows.map(numify) as T[];
+  });
 }
 
 function numify<T extends Record<string, unknown>>(row: T): T {
@@ -70,9 +89,11 @@ export async function qrun(
 ): Promise<{ changes: number; lastInsertRowid: number }> {
   const text = toPg(sql);
   const needsId = /^\s*INSERT\s/i.test(sql) && !/RETURNING/i.test(sql);
-  const res = await getPool().query(needsId ? `${text} RETURNING id` : text, params);
-  const id = Number(res.rows[0]?.id || 0);
-  return { changes: res.rowCount ?? 0, lastInsertRowid: id };
+  return withBotSchema(async (client) => {
+    const res = await client.query(needsId ? `${text} RETURNING id` : text, params);
+    const id = Number(res.rows[0]?.id || 0);
+    return { changes: res.rowCount ?? 0, lastInsertRowid: id };
+  });
 }
 
 export const BOT_SCHEMA = `
